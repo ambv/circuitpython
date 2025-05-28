@@ -1,0 +1,10 @@
+#define MICROPY_HW_BOARD_NAME "denki-oto rin"
+#define MICROPY_HW_MCU_NAME "rp2040"
+
+#define CIRCUITPY_STATUS_LED_POWER (&pin_GPIO16)
+
+#define DEFAULT_I2C_BUS_SDA (&pin_GPIO10)
+#define DEFAULT_I2C_BUS_SCL (&pin_GPIO11)
+
+#define DEFAULT_UART_BUS_TX (&pin_GPIO0)
+#define DEFAULT_UART_BUS_RX (&pin_GPIO1)
