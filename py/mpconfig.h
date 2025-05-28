@@ -1325,7 +1325,7 @@ typedef double mp_float_t;
 
 // Whether to provide mem-info related functions in micropython module
 #ifndef MICROPY_PY_MICROPYTHON_MEM_INFO
-#define MICROPY_PY_MICROPYTHON_MEM_INFO (MICROPY_CONFIG_ROM_LEVEL_AT_LEAST_EXTRA_FEATURES)
+#define MICROPY_PY_MICROPYTHON_MEM_INFO (CIRCUITPY_MICROPYTHON_ADVANCED)
 #endif
 
 // Whether to provide "micropython.stack_use" function
@@ -1335,7 +1335,7 @@ typedef double mp_float_t;
 
 // Whether to provide the "micropython.heap_locked" function
 #ifndef MICROPY_PY_MICROPYTHON_HEAP_LOCKED
-#define MICROPY_PY_MICROPYTHON_HEAP_LOCKED (MICROPY_CONFIG_ROM_LEVEL_AT_LEAST_EVERYTHING)
+#define MICROPY_PY_MICROPYTHON_HEAP_LOCKED (MICROPY_CONFIG_ROM_LEVEL_AT_LEAST_CORE_FEATURES)
 #endif
 
 // Whether to provide "array" module. Note that large chunk of the
