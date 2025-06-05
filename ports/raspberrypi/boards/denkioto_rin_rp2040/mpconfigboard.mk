@@ -7,3 +7,8 @@ CHIP_VARIANT = RP2040
 CHIP_FAMILY = rp2
 
 EXTERNAL_FLASH_DEVICES = "W25Q64JVxQ"
+
+# Board-specific multicore functionality
+SRC_C += boards/$(BOARD)/denkioto/multicore.c
+SRC_C += boards/$(BOARD)/denkioto/rin.c
+SRC_QSTR += boards/$(BOARD)/denkioto/rin.c

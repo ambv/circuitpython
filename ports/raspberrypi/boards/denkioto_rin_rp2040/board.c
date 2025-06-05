@@ -25,5 +25,15 @@
  */
 
 #include "supervisor/board.h"
+#include "denkioto/multicore.h"
 
 // Use the MP_WEAK supervisor/shared/board.c versions of routines not defined here.
+
+void board_init(void) {
+    denkioto_multicore_init();
+    denkioto_multicore_start_core1();
+}
+
+void board_deinit(void) {
+    denkioto_multicore_stop_core1();
+}
