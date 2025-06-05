@@ -97,8 +97,12 @@ TAGS
 # clangd cache
 ##############
 .cache
+compile_commands.json
 
 **/CLAUDE.local.md
 
 # windsurf rules
 .windsurfrules
+
+# Editors
+/.zed
