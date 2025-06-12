@@ -29,49 +29,49 @@ The RP2040 microcontroller has two ARM Cortex-M0+ cores, but standard CircuitPyt
 
 ## Multicore API
 
-The board provides a `denkioto_multicore` module with the following functions:
+The board provides a `denkioto_rin` module with the following functions:
 
 ### Functions
 
-#### `denkioto_multicore.start()`
+#### `denkioto_rin.start()`
 Start core1 execution. Core1 will begin running an infinite loop that increments an internal counter. If core1 is already running, this function has no effect.
 
-#### `denkioto_multicore.stop()`
+#### `denkioto_rin.stop()`
 Stop core1 execution. Core1 will be stopped and reset. If core1 is not running, this function has no effect.
 
-#### `denkioto_multicore.get_counter() -> int`
+#### `denkioto_rin.get_counter() -> int`
 Get the current counter value from core1. Returns the current value of the counter that core1 is incrementing. This value is read safely, so it's safe to call from core0 while core1 is running.
 
-#### `denkioto_multicore.is_running() -> bool`
+#### `denkioto_rin.is_running() -> bool`
 Check if core1 is currently running. Returns `True` if core1 is running, `False` otherwise.
 
-#### `denkioto_multicore.reset_counter()`
+#### `denkioto_rin.reset_counter()`
 Reset the counter to zero. This operation can be called safely while core1 is running.
 
 ## Example Usage
 
 ```python
 import time
-import denkioto_multicore
+import denkioto_rin
 
 # Check if core1 is running (it starts automatically)
-if denkioto_multicore.is_running():
+if denkioto_rin.is_running():
     print("Core1 is running!")
 
 # Monitor the counter
 for i in range(10):
-    counter = denkioto_multicore.get_counter()
+    counter = denkioto_rin.get_counter()
     print(f"Counter value: {counter}")
     time.sleep(1)
 
 # Reset the counter
-denkioto_multicore.reset_counter()
+denkioto_rin.reset_counter()
 
 # Stop core1
-denkioto_multicore.stop()
+denkioto_rin.stop()
 
 # Restart core1
-denkioto_multicore.start()
+denkioto_rin.start()
 ```
 
 ## Example Script
@@ -108,15 +108,6 @@ cd circuitpython/ports/raspberrypi
 make BOARD=denkioto_rin_rp2040
 ```
 
-## Files Added
-
-- `denkioto_multicore.h` - Header file for multicore functionality
-- `denkioto_multicore.c` - Core multicore implementation
-- `denkioto/multicore.h` - Python module header
-- `denkioto/multicore.c` - Python module implementation
-- `multicore_example.py` - Example usage script
-- `README.md` - This documentation
-
 ## Technical Notes
 
 - Core1 starts automatically in `board_init()`
@@ -124,15 +115,39 @@ make BOARD=denkioto_rin_rp2040
 - The implementation uses the Pico SDK's multicore functionality
 - Thread safety is ensured through proper synchronization primitives
 
-## Future Enhancements
+## Development Environment
 
-This implementation provides a foundation for more advanced multicore features:
+### VSCode Configuration
+Complete VSCode setup for CircuitPython development is available in the repository root `.vscode/` directory:
 
-- Custom user functions on core1
-- Inter-core message passing
-- Shared memory regions
-- Real-time processing capabilities
-- Hardware-specific optimizations
+- **C++ IntelliSense**: Configured to use clangd with ARM GCC toolchain detection
+- **Build Tasks**: Automated build with configuration tracking (OPT vs DEBUG)
+- **Multi-core Debugging**: Hardware debugging support via Raspberry Pi Debug Probe
+- **Smart Rebuilding**: Automatic clean when switching between optimized and debug builds
+
+### Hardware Debugging Setup
+- **Debug Probe**: Raspberry Pi Debug Probe (connect D port to device SWD pins)
+- **OpenOCD**: Required for debugging (`brew install openocd`)
+- **Multi-core Support**: Separate debug sessions for core0 (port 50000) and core1 (port 50003)
+- **Debug Configurations**:
+  - "Debug RP2040 Core0" - Launch debugging with automatic build
+  - "Attach to RP2040 Core0" - Attach to running firmware
+  - "Debug RP2040 Core1" - Debug second core
+
+### Build Configurations
+- **DEBUG Build**: `-Og -g3` optimization with debug symbols for effective debugging
+- **OPT Build**: `-O3` optimization for production (default)
+- **Build Tracking**: Automatic detection of configuration changes triggers clean rebuild
+
+### Board-Specific Settings
+- **Python Environment**: Uses `/Users/ambv/.virtualenvs/circuitpython-build` virtualenv
+- **Multicore Support**: Custom implementation in `boards/denkioto_rin_rp2040/denkioto/`
+
+### Key Development Notes
+- Debug builds are required for effective debugging (variables, stepping, breakpoints)
+- Core1 debugging requires external servertype connecting to existing OpenOCD instance
+- CIRCUITPY drive appears when firmware boots normally (not when halted in debugger)
+- VSCode tasks automatically handle virtualenv activation and configuration tracking
 
 ## License
 
