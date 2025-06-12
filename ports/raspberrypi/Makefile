@@ -504,7 +504,6 @@ SRC_SDK := \
 	src/rp2_common/pico_aon_timer/aon_timer.c \
 	src/rp2_common/pico_atomic/atomic.c \
 	src/rp2_common/pico_bootrom/bootrom.c \
-	src/rp2_common/pico_bootsel_via_double_reset/pico_bootsel_via_double_reset.c \
 	src/rp2_common/pico_clib_interface/newlib_interface.c \
 	src/rp2_common/pico_fix/rp2040_usb_device_enumeration/rp2040_usb_device_enumeration.c \
 	src/rp2_common/pico_float/float_math.c \
