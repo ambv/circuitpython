@@ -106,3 +106,6 @@ compile_commands.json
 
 # Editors
 /.zed
+/.clangd
+/.github/copilot-instructions.md
+/ports/raspberrypi/.build_config
