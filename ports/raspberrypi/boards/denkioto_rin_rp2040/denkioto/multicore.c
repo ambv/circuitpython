@@ -12,7 +12,6 @@
 // Global state variables
 static volatile bool core1_running = false;
 static volatile bool core1_should_stop = false;
-static volatile bool deinit_hit = false;
 static volatile uint32_t core1_counter = 0;
 
 //
@@ -63,27 +62,26 @@ void denkioto_multicore_start_core1(void) {
     }
 }
 
-int32_t denkioto_multicore_stop_core1(int in_deinit) {
-    if (in_deinit) {
-        deinit_hit = true;
-    }
-
+int32_t denkioto_multicore_stop_core1(int where) {
     if (!core1_running) {
-        printf("denkioto_multicore_stop_core1() called but core1 is not running, in_deinit: %d\n", in_deinit);
+        printf("denkioto_multicore_stop_core1() called but core1 is not running, where: %d\n", where);
         return -1;
     }
+
+    printf("Before scheduling stop: core1_running: %d, core1_should_stop: %d\n",
+        core1_running, core1_should_stop);
 
     // Signal core1 to stop
     core1_should_stop = true;
 
     // Wait for core1 to actually stop with longer timeout
-    long retries = 10000;
+    long retries = 500000;
     while (core1_running && retries > 0) {
         retries--;
         tight_loop_contents();
     }
 
-    printf("Before reset: core1_running: %d, core1_should_stop: %d, retries left: %ld\n",
+    printf("Before core reset: core1_running: %d, core1_should_stop: %d, retries left: %ld\n",
         core1_running, core1_should_stop, retries);
 
     // Reset the core (this will also reset its stack and state)
@@ -93,7 +91,7 @@ int32_t denkioto_multicore_stop_core1(int in_deinit) {
     // Force reset our state variables after core reset
     denkioto_multicore_init();
 
-    printf("denkioto_multicore_stop_core1() called, in_deinit: %d, retries left: %ld\n", in_deinit, retries);
+    printf("denkioto_multicore_stop_core1() called, where: %d, retries left: %ld\n", where, retries);
 
     return retries;
 }
@@ -104,6 +102,9 @@ uint32_t denkioto_multicore_get_counter(void) {
 
 bool denkioto_multicore_is_core1_running(void) {
     printf("denkioto_multicore_is_core1_running() called, core1_running: %d\n", core1_running);
+    for (int irq_num = 0; irq_num < 26; irq_num++) {
+        printf("is IRQ %d enabled? %d\n", irq_num, irq_is_enabled(irq_num));
+    }
     return core1_running;
 }
 

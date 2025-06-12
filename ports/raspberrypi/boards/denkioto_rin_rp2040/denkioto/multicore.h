@@ -12,7 +12,7 @@
 
 void denkioto_multicore_init(void);
 void denkioto_multicore_start_core1(void);
-int32_t denkioto_multicore_stop_core1(int in_deinit);
+int32_t denkioto_multicore_stop_core1(int where);
 uint32_t denkioto_multicore_get_counter(void);
 bool denkioto_multicore_is_core1_running(void);
 void denkioto_multicore_reset_counter(void);

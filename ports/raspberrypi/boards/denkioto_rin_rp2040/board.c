@@ -38,6 +38,10 @@ void board_init(void) {
     denkioto_multicore_init();
 }
 
-void board_deinit(void) {
+void reset_board(void) {
     denkioto_multicore_stop_core1(1);
+}
+
+void board_deinit(void) {
+    denkioto_multicore_stop_core1(2);
 }
