@@ -32,7 +32,7 @@ static mp_obj_t denkioto_rin_start(void) {
 static MP_DEFINE_CONST_FUN_OBJ_0(denkioto_rin_start_obj, denkioto_rin_start);
 
 static mp_obj_t denkioto_rin_stop(void) {
-    // | def stop() -> None:
+    // | def stop() -> int:
     // |     """Stop core1 execution.
     // |
     // |     Core1 will be stopped and reset. If core1 is not running, this function
@@ -40,8 +40,7 @@ static mp_obj_t denkioto_rin_stop(void) {
     // |     """
     // |     ...
     // |
-    denkioto_multicore_stop_core1();
-    return mp_const_none;
+    return mp_obj_new_int(denkioto_multicore_stop_core1(0));
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(denkioto_rin_stop_obj, denkioto_rin_stop);
 

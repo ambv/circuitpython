@@ -158,7 +158,7 @@ msgstr ""
 msgid "%q length must be >= %d"
 msgstr ""
 
-#: py/modsys.c py/runtime.c
+#: py/runtime.c
 msgid "%q moved from %q to %q"
 msgstr ""
 
