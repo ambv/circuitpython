@@ -13,7 +13,7 @@ def main():
     print("Denkioto Rin RP2040 Multicore Example")
     print("=====================================")
 
-    # Check if core1 is already running (it starts automatically on boot)
+    # Check if core1 is already running (it shouldn't as it's not automatically started to avoid race conditions)
     if denkioto_rin.is_running():
         print("Core1 is already running!")
     else:

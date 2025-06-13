@@ -36,7 +36,8 @@ static mp_obj_t denkioto_rin_stop(void) {
     // |     """Stop core1 execution.
     // |
     // |     Core1 will be stopped and reset. If core1 is not running, this function
-    // |     has no effect.
+    // |     has no effect. Returns the number of retries it took to stop core1.
+    // |     In case core1 was not running, it will return -1.
     // |     """
     // |     ...
     // |
@@ -85,6 +86,65 @@ static mp_obj_t denkioto_rin_reset_counter_func(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(denkioto_rin_reset_counter_obj, denkioto_rin_reset_counter_func);
 
+static mp_obj_t denkioto_rin_get_ring_value_func(mp_obj_t ring_obj, mp_obj_t index_obj) {
+    // | def get_ring_value(ring: int, index: int) -> int:
+    // |     """Get a single value from a ring's data array.
+    // |
+    // |     :param ring: Ring number (0-3)
+    // |     :param index: Index in the ring's data array (0-24)
+    // |     :return: The value at the specified position, or -1 if invalid parameters
+    // |     """
+    // |     ...
+    // |
+    int ring = mp_obj_get_int(ring_obj);
+    int index = mp_obj_get_int(index_obj);
+    return mp_obj_new_int(denkioto_multicore_get_ring_value(ring, index));
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(denkioto_rin_get_ring_value_obj, denkioto_rin_get_ring_value_func);
+
+static mp_obj_t denkioto_rin_get_ring_values_func(mp_obj_t ring_obj) {
+    // | def get_ring_values(ring: int) -> list[int]:
+    // |     """Get all values from a ring's data array.
+    // |
+    // |     :param ring: Ring number (0-3)
+    // |     :return: A list of 25 values from the ring's data array
+    // |     """
+    // |     ...
+    // |
+    int ring = mp_obj_get_int(ring_obj);
+    if (ring < 0 || ring >= 4) {
+        mp_raise_ValueError(MP_ERROR_TEXT("Ring number must be 0-3"));
+    }
+
+    mp_obj_t values_list = mp_obj_new_list(0, NULL);
+    int values[25];
+    denkioto_multicore_get_ring_values(ring, values, 25);
+
+    for (int i = 0; i < 25; i++) {
+        mp_obj_list_append(values_list, mp_obj_new_int(values[i]));
+    }
+
+    return values_list;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(denkioto_rin_get_ring_values_obj, denkioto_rin_get_ring_values_func);
+
+static mp_obj_t denkioto_rin_clear_ring_values_func(mp_obj_t ring_obj) {
+    // | def clear_ring_values(ring: int) -> None:
+    // |     """Clear all values for a specific ring.
+    // |
+    // |     :param ring: Ring number (0-3)
+    // |     """
+    // |     ...
+    // |
+    int ring = mp_obj_get_int(ring_obj);
+    if (ring < 0 || ring >= 4) {
+        mp_raise_ValueError(MP_ERROR_TEXT("Ring number must be 0-3"));
+    }
+    denkioto_multicore_clear_ring_values(ring);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(denkioto_rin_clear_ring_values_obj, denkioto_rin_clear_ring_values_func);
+
 static const mp_rom_map_elem_t denkioto_rin_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR___name__), MP_ROM_QSTR(MP_QSTR_denkioto_rin) },
     { MP_ROM_QSTR(MP_QSTR_start), MP_ROM_PTR(&denkioto_rin_start_obj) },
@@ -92,6 +152,9 @@ static const mp_rom_map_elem_t denkioto_rin_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_get_counter), MP_ROM_PTR(&denkioto_rin_get_counter_obj) },
     { MP_ROM_QSTR(MP_QSTR_is_running), MP_ROM_PTR(&denkioto_rin_is_running_obj) },
     { MP_ROM_QSTR(MP_QSTR_reset_counter), MP_ROM_PTR(&denkioto_rin_reset_counter_obj) },
+    { MP_ROM_QSTR(MP_QSTR_get_ring_value), MP_ROM_PTR(&denkioto_rin_get_ring_value_obj) },
+    { MP_ROM_QSTR(MP_QSTR_get_ring_values), MP_ROM_PTR(&denkioto_rin_get_ring_values_obj) },
+    { MP_ROM_QSTR(MP_QSTR_clear_ring_values), MP_ROM_PTR(&denkioto_rin_clear_ring_values_obj) },
 };
 
 static MP_DEFINE_CONST_DICT(denkioto_rin_module_globals, denkioto_rin_module_globals_table);

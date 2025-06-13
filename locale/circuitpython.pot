@@ -1922,6 +1922,10 @@ msgstr ""
 msgid "Right format but not supported"
 msgstr ""
 
+#: ports/raspberrypi/boards/denkioto_rin_rp2040/denkioto/rin.c
+msgid "Ring number must be 0-3"
+msgstr ""
+
 #: main.c
 msgid "Running in safe mode! Not running saved code.\n"
 msgstr ""

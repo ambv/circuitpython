@@ -17,4 +17,9 @@ uint32_t denkioto_multicore_get_counter(void);
 bool denkioto_multicore_is_core1_running(void);
 void denkioto_multicore_reset_counter(void);
 
+// RingVals accessor functions
+int denkioto_multicore_get_ring_value(int ring, int index);
+void denkioto_multicore_get_ring_values(int ring, int *values, int count);
+void denkioto_multicore_clear_ring_values(int ring);
+
 #endif // DENKIOTO_MULTICORE_H

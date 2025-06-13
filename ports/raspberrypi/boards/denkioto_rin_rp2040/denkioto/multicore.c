@@ -7,16 +7,49 @@
 #include "multicore.h"
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
+#include "hardware/gpio.h"
+#include "hardware/pio.h"
+#include "denkioto/uart_rx.pio.h"
 #include <stdio.h>
+#include <math.h>
+#include <stdlib.h>
+
+#define clamp(amt, low, high) ((amt) < (low) ? (low) : ((amt) > (high) ? (high) : (amt)))
+#ifndef __min
+#define __min(a, b) (((a) < (b)) ? (a) : (b))
+#endif
+#ifndef __max
+#define __max(a, b) (((a) > (b)) ? (a) : (b))
+#endif
+
+#define TX_PIN_MIDI 0  // UART 0
+#define RX_PIN_MIDI 1  // UART 0
+#define TX_PIN0 2
+#define RX_PIN0 3
+#define TX_PIN1 4
+#define RX_PIN1 5
+#define TX_PIN2 6
+#define RX_PIN2 7
+#define TX_PIN3 8
+#define RX_PIN3 9
 
 // Global state variables
 static volatile bool core1_running = false;
 static volatile bool core1_should_stop = false;
 static volatile uint32_t core1_counter = 0;
 
+static int RingVals[4][25];
+PIO uart_pio = pio0;
+uint uart0_sm = 0;
+uint uart1_sm = 1;
+uint uart2_sm = 2;
+uint uart3_sm = 3;
+static int uart_pio_offset = -1;
+
 //
-// Forward declaration
+// Forward declarations
 static void __not_in_flash_func(denkioto_core1_main)(void);
+static bool denkioto_get_uart_rx(PIO pio, uint sm, uint8_t *data);
 
 // Core1 main function that runs the infinite loop
 static void __not_in_flash_func(denkioto_core1_main)(void) {
@@ -29,6 +62,22 @@ static void __not_in_flash_func(denkioto_core1_main)(void) {
     while (!core1_should_stop) {
         // Atomic increment of the counter
         __atomic_add_fetch(&core1_counter, 1, __ATOMIC_SEQ_CST);
+
+        for (int i = 0; i < 4; i++)
+        {
+            uint8_t data;
+            static int ledidx[4] = {0, 0, 0, 0};
+            if (denkioto_get_uart_rx(uart_pio, i, &data)) {
+                if (data == 0) {
+                    ledidx[i] = 0;
+                } else {
+                    if (ledidx[i] < 25) {
+                        int V = __min(255, abs((int)data));
+                        RingVals[i][ledidx[i]++] = __min(255, __max(0, (V - 127) * 2));
+                    }
+                }
+            }
+        }
 
         tight_loop_contents();
     }
@@ -52,6 +101,13 @@ void denkioto_multicore_start_core1(void) {
 
     // Reset stop flag
     core1_should_stop = false;
+
+    // Set up PIO to read touch rings
+    uart_pio_offset = pio_add_program(uart_pio, &uart_rx_program);
+    uart_rx_program_init(uart_pio, uart0_sm, uart_pio_offset, RX_PIN0, 100000);
+    uart_rx_program_init(uart_pio, uart1_sm, uart_pio_offset, RX_PIN1, 100000);
+    uart_rx_program_init(uart_pio, uart2_sm, uart_pio_offset, RX_PIN2, 100000);
+    uart_rx_program_init(uart_pio, uart3_sm, uart_pio_offset, RX_PIN3, 100000);
 
     // Launch core1
     multicore_launch_core1(denkioto_core1_main);
@@ -84,6 +140,24 @@ int32_t denkioto_multicore_stop_core1(int where) {
     printf("Before core reset: core1_running: %d, core1_should_stop: %d, retries left: %ld\n",
         core1_running, core1_should_stop, retries);
 
+    // Stop and reset PIO state machines
+    pio_sm_set_enabled(uart_pio, uart0_sm, false);
+    pio_sm_set_enabled(uart_pio, uart1_sm, false);
+    pio_sm_set_enabled(uart_pio, uart2_sm, false);
+    pio_sm_set_enabled(uart_pio, uart3_sm, false);
+
+    // Clear FIFOs
+    pio_sm_clear_fifos(uart_pio, uart0_sm);
+    pio_sm_clear_fifos(uart_pio, uart1_sm);
+    pio_sm_clear_fifos(uart_pio, uart2_sm);
+    pio_sm_clear_fifos(uart_pio, uart3_sm);
+
+    // Remove the PIO program if it was loaded
+    if (uart_pio_offset >= 0) {
+        pio_remove_program(uart_pio, &uart_rx_program, uart_pio_offset);
+        uart_pio_offset = -1;
+    }
+
     // Reset the core (this will also reset its stack and state)
     multicore_reset_core1();
     spin_locks_reset();
@@ -110,4 +184,43 @@ bool denkioto_multicore_is_core1_running(void) {
 
 void denkioto_multicore_reset_counter(void) {
     __atomic_store_n(&core1_counter, 0, __ATOMIC_SEQ_CST);
+}
+
+static bool denkioto_get_uart_rx(PIO pio, uint sm, uint8_t *data) {
+    // 8-bit read from the uppermost byte of the FIFO, as data is left-justified
+    if (pio_sm_is_rx_fifo_empty(pio, sm)) {
+        return false;
+    }
+    io_rw_8 *rxfifo_shift = (io_rw_8 *)&pio->rxf[sm] + 3;
+    *data = *rxfifo_shift;
+    return true;
+}
+
+// RingVals accessor functions
+int denkioto_multicore_get_ring_value(int ring, int index) {
+    if (ring < 0 || ring >= 4 || index < 0 || index >= 25) {
+        return -1;  // Invalid parameters
+    }
+    return RingVals[ring][index];
+}
+
+void denkioto_multicore_get_ring_values(int ring, int *values, int count) {
+    if (ring < 0 || ring >= 4 || values == NULL || count <= 0) {
+        return;  // Invalid parameters
+    }
+
+    int copy_count = count > 25 ? 25 : count;
+    for (int i = 0; i < copy_count; i++) {
+        values[i] = RingVals[ring][i];
+    }
+}
+
+void denkioto_multicore_clear_ring_values(int ring) {
+    if (ring < 0 || ring >= 4) {
+        return;  // Invalid parameter
+    }
+
+    for (int i = 0; i < 25; i++) {
+        RingVals[ring][i] = 0;
+    }
 }
