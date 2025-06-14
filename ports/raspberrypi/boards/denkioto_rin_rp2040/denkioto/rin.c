@@ -145,6 +145,40 @@ static mp_obj_t denkioto_rin_clear_ring_values_func(mp_obj_t ring_obj) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(denkioto_rin_clear_ring_values_obj, denkioto_rin_clear_ring_values_func);
 
+static mp_obj_t denkioto_rin_get_resync_count_func(mp_obj_t ring_obj) {
+    // | def get_resync_count(ring: int) -> int:
+    // |     """Get the number of times a ring has been resynchronized.
+    // |
+    // |     :param ring: Ring number (0-3)
+    // |     :return: Number of resync operations performed on this ring
+    // |     """
+    // |     ...
+    // |
+    int ring = mp_obj_get_int(ring_obj);
+    if (ring < 0 || ring >= 4) {
+        mp_raise_ValueError(MP_ERROR_TEXT("Ring number must be 0-3"));
+    }
+    return mp_obj_new_int(denkioto_multicore_get_resync_count(ring));
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(denkioto_rin_get_resync_count_obj, denkioto_rin_get_resync_count_func);
+
+static mp_obj_t denkioto_rin_get_data_ready_count_func(mp_obj_t ring_obj) {
+    // | def get_data_ready_count(ring: int) -> int:
+    // |     """Get the number of times data was marked ready for a ring.
+    // |
+    // |     :param ring: Ring number (0-3)
+    // |     :return: Number of times data was marked ready for this ring
+    // |     """
+    // |     ...
+    // |
+    int ring = mp_obj_get_int(ring_obj);
+    if (ring < 0 || ring >= 4) {
+        mp_raise_ValueError(MP_ERROR_TEXT("Ring number must be 0-3"));
+    }
+    return mp_obj_new_int(denkioto_multicore_get_data_ready_count(ring));
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(denkioto_rin_get_data_ready_count_obj, denkioto_rin_get_data_ready_count_func);
+
 static const mp_rom_map_elem_t denkioto_rin_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR___name__), MP_ROM_QSTR(MP_QSTR_denkioto_rin) },
     { MP_ROM_QSTR(MP_QSTR_start), MP_ROM_PTR(&denkioto_rin_start_obj) },
@@ -155,6 +189,8 @@ static const mp_rom_map_elem_t denkioto_rin_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_get_ring_value), MP_ROM_PTR(&denkioto_rin_get_ring_value_obj) },
     { MP_ROM_QSTR(MP_QSTR_get_ring_values), MP_ROM_PTR(&denkioto_rin_get_ring_values_obj) },
     { MP_ROM_QSTR(MP_QSTR_clear_ring_values), MP_ROM_PTR(&denkioto_rin_clear_ring_values_obj) },
+    { MP_ROM_QSTR(MP_QSTR_get_resync_count), MP_ROM_PTR(&denkioto_rin_get_resync_count_obj) },
+    { MP_ROM_QSTR(MP_QSTR_get_data_ready_count), MP_ROM_PTR(&denkioto_rin_get_data_ready_count_obj) },
 };
 
 static MP_DEFINE_CONST_DICT(denkioto_rin_module_globals, denkioto_rin_module_globals_table);

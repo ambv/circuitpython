@@ -22,4 +22,8 @@ int denkioto_multicore_get_ring_value(int ring, int index);
 void denkioto_multicore_get_ring_values(int ring, int *values, int count);
 void denkioto_multicore_clear_ring_values(int ring);
 
+// Debug counter accessor functions
+long denkioto_multicore_get_resync_count(int ring);
+long denkioto_multicore_get_data_ready_count(int ring);
+
 #endif // DENKIOTO_MULTICORE_H
