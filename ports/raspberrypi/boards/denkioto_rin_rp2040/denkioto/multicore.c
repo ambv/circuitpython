@@ -14,6 +14,7 @@
 #include "multicore.h"
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
+#include "hardware/sync.h"
 #include "hardware/gpio.h"
 #include "hardware/pio.h"
 #include "hardware/dma.h"
@@ -23,6 +24,24 @@
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#include "hardware/uart.h"
+#include "hardware/timer.h"
+#include "tusb.h"
+
+// TinyUSB internal structures for direct FIFO access
+#include "tusb_config.h"
+#include "common/tusb_fifo.h"
+#include "class/midi/midi.h"
+
+// Buffer size constants (defined in RP2040 Makefile)
+#ifndef CFG_TUD_MIDI_RX_BUFSIZE
+#define CFG_TUD_MIDI_RX_BUFSIZE 128
+#endif
+#ifndef CFG_TUD_MIDI_TX_BUFSIZE
+#define CFG_TUD_MIDI_TX_BUFSIZE 128
+#endif
+
+// No longer need TinyUSB internal structures - using atomic counters instead
 
 #define clamp(amt, low, high) ((amt) < (low) ? (low) : ((amt) > (high) ? (high) : (amt)))
 #ifndef __min
@@ -42,6 +61,8 @@
 #define RX_PIN2 7
 #define TX_PIN3 8
 #define RX_PIN3 9
+#define POWENABLE_PIN 21  // GPIO21 controls MIDI IN circuit power
+
 
 // Global state variables
 static volatile bool core1_running = false;
@@ -82,14 +103,105 @@ static int dma_channels[4] = {-1, -1, -1, -1};
 // DMA control blocks for chaining
 static dma_channel_config dma_configs[4];
 
+
+// MIDI Clock definitions
+#define MIDI_BAUDRATE 31250
+#define MIDI_CLOCK 0xF8
+#define MIDI_START 0xFA
+#define MIDI_CONTINUE 0xFB
+#define MIDI_STOP 0xFC
+
+// Two-stage filter constants for BPM stability
+#define BPM_SHORT_WINDOW 8   // For detecting tempo changes (8 clocks = 1/3 beat)
+#define BPM_LONG_WINDOW 24   // For stable output (24 clocks = 1 beat)
+
+// MIDI Clock state structure
+typedef struct {
+    volatile uint32_t current_bpm_x1000;     // BPM * 1000 for precision
+    volatile uint8_t transport_state;        // 0=stop, 1=play, 2=pause
+    volatile uint8_t active_source;          // 0=none, 1=uart, 2=usb
+    volatile uint64_t last_clock_timestamp_uart;  // UART-specific timestamp
+    volatile uint64_t last_clock_timestamp_usb;   // USB-specific timestamp
+    volatile uint32_t clock_count;           // Since transport start
+    volatile uint8_t source_priority[2];     // [uart=1, usb=2] priority order
+    volatile uint64_t last_source_seen[3];   // Timestamp when each source was last seen
+    volatile uint32_t core1_clock_count;     // Clocks processed by Core 1
+    volatile uint32_t core0_filtered_count;  // Clocks filtered by Core 0
+    volatile uint32_t error_count;           // Missed messages
+    // Two-stage filter data
+    volatile uint64_t short_intervals[BPM_SHORT_WINDOW];
+    volatile uint64_t long_intervals[BPM_LONG_WINDOW];
+    volatile uint8_t short_index;
+    volatile uint8_t long_index;
+    volatile uint8_t intervals_filled;       // How many intervals we've collected
+} unified_midi_clock_t;
+
+static unified_midi_clock_t midi_clock_state;
+
+// Initialize MIDI clock state to default values
+static void init_midi_clock_state(void) {
+    midi_clock_state.current_bpm_x1000 = 120000;  // Default 120 BPM
+    midi_clock_state.transport_state = 0;          // Stopped
+    midi_clock_state.active_source = 0;            // None
+    midi_clock_state.last_clock_timestamp_uart = 0;
+    midi_clock_state.last_clock_timestamp_usb = 0;
+    midi_clock_state.clock_count = 0;
+    midi_clock_state.source_priority[0] = 1;       // UART first
+    midi_clock_state.source_priority[1] = 2;       // USB second
+    midi_clock_state.last_source_seen[0] = 0;
+    midi_clock_state.last_source_seen[1] = 0;
+    midi_clock_state.last_source_seen[2] = 0;
+    midi_clock_state.core1_clock_count = 0;
+    midi_clock_state.core0_filtered_count = 0;
+    midi_clock_state.error_count = 0;
+
+    // Initialize two-stage filter
+    for (int i = 0; i < BPM_SHORT_WINDOW; i++) {
+        midi_clock_state.short_intervals[i] = 0;
+    }
+    for (int i = 0; i < BPM_LONG_WINDOW; i++) {
+        midi_clock_state.long_intervals[i] = 0;
+    }
+    midi_clock_state.short_index = 0;
+    midi_clock_state.long_index = 0;
+    midi_clock_state.intervals_filled = 0;
+}
+
+// Clock source timeout in microseconds (500ms)
+#define CLOCK_SOURCE_TIMEOUT_US 500000
+
+static volatile uint64_t last_usb_poll_time = 0;
+
+// USB MIDI clock tracking state
+static struct {
+    uint32_t last_clock_count;
+    uint32_t last_start_count;
+    uint32_t last_continue_count;
+    uint32_t last_stop_count;
+} usb_midi_tracking = {0};
+
+static void init_usb_midi_tracking(void) {
+    last_usb_poll_time = 0;
+    usb_midi_tracking.last_clock_count = 0;
+    usb_midi_tracking.last_start_count = 0;
+    usb_midi_tracking.last_continue_count = 0;
+    usb_midi_tracking.last_stop_count = 0;
+}
+
 //
 // Forward declarations
 static void __not_in_flash_func(denkioto_core1_main)(void);
 static void setup_dma_for_ring(int ring);
 static void update_stable_ring_data(void);
+static inline void process_midi_clock_uart(uint64_t timestamp);
+static inline void process_transport_message(uint8_t message, uint64_t timestamp);
+static void process_midi_clock_usb(uint8_t message, uint64_t timestamp);
+static void setup_uart_midi(void);
+static void midi_uart_irq_handler(void);
+static void core1_usb_midi_poll(void);
 
 // Touch ring DMA interrupt handler (uses DMA_IRQ_1)
-static void __isr touch_ring_dma_irq_handler(void) {
+static void __isr __not_in_flash_func(touch_ring_dma_irq_handler)(void) {
     // Check which of our DMA channels triggered the interrupt
     for (int ring = 0; ring < 4; ring++) {
         if (dma_channels[ring] >= 0 && dma_channel_get_irq1_status(dma_channels[ring])) {
@@ -136,18 +248,301 @@ static void __isr touch_ring_dma_irq_handler(void) {
     }
 }
 
+// MIDI UART interrupt handler
+static void __isr __not_in_flash_func(midi_uart_irq_handler)(void) {
+    // Check if UART0 has data available
+    while (uart_is_readable(uart0)) {
+        uint64_t timestamp = time_us_64();  // Microsecond precision
+        uint8_t byte = uart_getc(uart0);
+
+        if (byte == MIDI_CLOCK) {
+            process_midi_clock_uart(timestamp);
+        } else if (byte == MIDI_START || byte == MIDI_CONTINUE || byte == MIDI_STOP) {
+            process_transport_message(byte, timestamp);
+        }
+        // Other MIDI messages are ignored by Core 1 - Core 0 will handle them
+    }
+}
+
+// Process MIDI clock from UART source
+// Helper function to calculate average of an interval array
+static uint64_t calculate_interval_average(const volatile uint64_t *intervals, uint8_t count) {
+    if (count == 0) {
+        return 0;
+    }
+
+    uint64_t sum = 0;
+    for (uint8_t i = 0; i < count; i++) {
+        if (intervals[i] > 0) {  // Only count valid intervals
+            sum += intervals[i];
+        }
+    }
+    return sum / count;
+}
+
+// Two-stage filter for BPM calculation (only for active source)
+static inline void update_bpm_with_interval(uint64_t interval, uint8_t source) {
+    if (interval == 0 || interval > 1000000) {
+        return;  // Sanity check
+    }
+
+    // Only update BPM calculation if this is the active source
+    if (midi_clock_state.active_source != source) {
+        return;  // Ignore intervals from inactive sources
+    }
+    // Store in both windows
+    midi_clock_state.short_intervals[midi_clock_state.short_index] = interval;
+    midi_clock_state.short_index = (midi_clock_state.short_index + 1) % BPM_SHORT_WINDOW;
+
+    midi_clock_state.long_intervals[midi_clock_state.long_index] = interval;
+    midi_clock_state.long_index = (midi_clock_state.long_index + 1) % BPM_LONG_WINDOW;
+
+    // Track how many samples we've collected
+    if (midi_clock_state.intervals_filled < BPM_LONG_WINDOW) {
+        midi_clock_state.intervals_filled++;
+    }
+
+    // Calculate averages based on how many samples we have
+    uint64_t short_avg, long_avg;
+
+    if (midi_clock_state.intervals_filled >= BPM_SHORT_WINDOW) {
+        short_avg = calculate_interval_average(midi_clock_state.short_intervals, BPM_SHORT_WINDOW);
+    } else {
+        short_avg = calculate_interval_average(midi_clock_state.short_intervals, midi_clock_state.intervals_filled);
+    }
+
+    if (midi_clock_state.intervals_filled >= BPM_LONG_WINDOW) {
+        long_avg = calculate_interval_average(midi_clock_state.long_intervals, BPM_LONG_WINDOW);
+    } else {
+        long_avg = short_avg;  // Not enough samples for long window yet
+    }
+
+    // Choose which average to use
+    uint64_t final_interval;
+
+    if (midi_clock_state.intervals_filled >= BPM_LONG_WINDOW) {
+        // Check if short and long averages agree within 0.5%
+        uint64_t diff = (short_avg > long_avg) ? (short_avg - long_avg) : (long_avg - short_avg);
+        if (diff < long_avg / 200) {
+            // Stable tempo - use long average
+            final_interval = long_avg;
+        } else {
+            // Tempo is changing - use short average for responsiveness
+            final_interval = short_avg;
+        }
+    } else {
+        // Still filling buffers - use what we have
+        final_interval = short_avg;
+    }
+
+    // Calculate BPM from final interval
+    // BPM = 60,000,000 / (interval * 24)
+    // BPM * 1000 = 60,000,000,000 / (interval * 24) = 2,500,000,000 / interval
+    midi_clock_state.current_bpm_x1000 = (uint32_t)(2500000000ULL / final_interval);
+}
+
+static inline void process_midi_clock_uart(uint64_t timestamp) {
+    // Calculate BPM from clock interval (24 clocks per quarter note)
+    if (midi_clock_state.transport_state == 1 && midi_clock_state.last_clock_timestamp_uart > 0) {
+        uint64_t interval = timestamp - midi_clock_state.last_clock_timestamp_uart;
+        update_bpm_with_interval(interval, 1);  // UART = source 1
+    }
+
+    midi_clock_state.last_clock_timestamp_uart = timestamp;
+    midi_clock_state.last_source_seen[1] = timestamp;  // UART = source 1
+    midi_clock_state.clock_count++;
+    midi_clock_state.core1_clock_count++;  // Track Core 1 processing
+
+    // Update active source if needed
+    if (midi_clock_state.active_source != 1) {
+        midi_clock_state.active_source = 1;  // UART is now active
+        // Reset filter state when switching to UART
+        midi_clock_state.intervals_filled = 0;
+        midi_clock_state.short_index = 0;
+        midi_clock_state.long_index = 0;
+    }
+}
+
+// Process transport messages (Start/Stop/Continue)
+static inline void process_transport_message(uint8_t message, uint64_t timestamp) {
+    switch (message) {
+        case MIDI_START:
+            midi_clock_state.transport_state = 1;  // Playing
+            midi_clock_state.clock_count = 0;
+            midi_clock_state.last_clock_timestamp_uart = 0;  // Reset for new BPM calculation
+            midi_clock_state.last_clock_timestamp_usb = 0;   // Reset for new BPM calculation
+            // Reset filter state for fresh start
+            midi_clock_state.intervals_filled = 0;
+            midi_clock_state.short_index = 0;
+            midi_clock_state.long_index = 0;
+            break;
+        case MIDI_STOP:
+            midi_clock_state.transport_state = 0;  // Stopped
+            break;
+        case MIDI_CONTINUE:
+            midi_clock_state.transport_state = 1;  // Playing
+            break;
+    }
+    midi_clock_state.last_source_seen[1] = timestamp;  // UART = source 1
+}
+
+// Setup UART for MIDI
+__attribute__((used))
+static void setup_uart_midi(void) {
+    // First, ensure UART0 is deinitialized in case CircuitPython was using it
+    uart_deinit(uart0);
+
+    // Initialize UART0 for MIDI
+    uart_init(uart0, MIDI_BAUDRATE);
+
+    // Set TX and RX pins
+    gpio_set_function(TX_PIN_MIDI, GPIO_FUNC_UART);
+    gpio_set_function(RX_PIN_MIDI, GPIO_FUNC_UART);
+
+    // Set UART flow control off
+    uart_set_hw_flow(uart0, false, false);
+
+    // Set data format: 8 data bits, 1 stop bit, no parity
+    uart_set_format(uart0, 8, 1, UART_PARITY_NONE);
+
+    // Clear any pending data in the UART RX FIFO
+    while (uart_is_readable(uart0)) {
+        uart_getc(uart0);
+    }
+
+    // Enable UART RX interrupt on Core 1
+    irq_set_exclusive_handler(UART0_IRQ, midi_uart_irq_handler);
+    irq_set_enabled(UART0_IRQ, true);
+    irq_set_priority(UART0_IRQ, PICO_LOWEST_IRQ_PRIORITY);
+    uart_set_irq_enables(uart0, true, false);  // RX only
+}
+
+// Process MIDI clock from USB source
+static void __not_in_flash_func(process_midi_clock_usb)(uint8_t message, uint64_t timestamp) {
+    if (message == MIDI_CLOCK) {
+        // Calculate BPM from clock interval (24 clocks per quarter note)
+        if (midi_clock_state.transport_state == 1 && midi_clock_state.last_clock_timestamp_usb > 0) {
+            uint64_t interval = timestamp - midi_clock_state.last_clock_timestamp_usb;
+            update_bpm_with_interval(interval, 2);  // USB = source 2
+        }
+
+        midi_clock_state.last_clock_timestamp_usb = timestamp;
+        midi_clock_state.last_source_seen[2] = timestamp;  // USB = source 2
+        midi_clock_state.clock_count++;
+        midi_clock_state.core1_clock_count++;  // Track Core 1 processing
+
+        // Update active source based on priority
+        if (midi_clock_state.active_source != 2) {
+            // Check if higher priority source (UART) is still active
+            uint64_t uart_last_seen = midi_clock_state.last_source_seen[1];
+            if (timestamp - uart_last_seen > CLOCK_SOURCE_TIMEOUT_US) {
+                // UART has timed out, USB can take over
+                midi_clock_state.active_source = 2;
+                // Reset filter state when switching to USB
+                midi_clock_state.intervals_filled = 0;
+                midi_clock_state.short_index = 0;
+                midi_clock_state.long_index = 0;
+            }
+        }
+    } else if (message == MIDI_START || message == MIDI_CONTINUE || message == MIDI_STOP) {
+        // Update transport state
+        switch (message) {
+            case MIDI_START:
+                midi_clock_state.transport_state = 1;  // Playing
+                midi_clock_state.clock_count = 0;
+                midi_clock_state.last_clock_timestamp_uart = 0;  // Reset for new BPM calculation
+                midi_clock_state.last_clock_timestamp_usb = 0;   // Reset for new BPM calculation
+                // Reset filter state for fresh start
+                midi_clock_state.intervals_filled = 0;
+                midi_clock_state.short_index = 0;
+                midi_clock_state.long_index = 0;
+                break;
+            case MIDI_STOP:
+                midi_clock_state.transport_state = 0;  // Stopped
+                break;
+            case MIDI_CONTINUE:
+                midi_clock_state.transport_state = 1;  // Playing
+                break;
+        }
+        midi_clock_state.last_source_seen[2] = timestamp;  // USB = source 2
+    }
+}
+
+// Core 1 USB MIDI clock monitoring using atomic counters
+static void core1_usb_midi_poll(void) {
+    uint64_t now = time_us_64();
+    uint64_t last_poll_time = last_usb_poll_time;
+    last_usb_poll_time = now;
+
+    // Check if USB is enumerated
+    if (!tud_ready()) {
+        return;
+    }
+
+    // Check for new clock messages using atomic counters
+    // TinyUSB increments these when it receives clock messages
+    uint32_t current_clock_count = denkioto_get_usb_midi_clock_count();
+    uint32_t current_start_count = denkioto_get_usb_midi_start_count();
+    uint32_t current_continue_count = denkioto_get_usb_midi_continue_count();
+    uint32_t current_stop_count = denkioto_get_usb_midi_stop_count();
+
+    // Process multiple clock messages with smeared timestamps
+    int32_t clock_delta = current_clock_count - usb_midi_tracking.last_clock_count;
+    if (clock_delta > 0) {
+        if (clock_delta == 1) {
+            // Single clock: use current timestamp
+            process_midi_clock_usb(MIDI_CLOCK, now);
+        } else {
+            // Multiple clocks: smear timestamps evenly over the polling interval
+            uint64_t time_per_pulse = (now - last_poll_time) / clock_delta;
+            for (uint32_t i = 0; i < (uint32_t)clock_delta; i++) {
+                uint64_t synthetic_timestamp = last_poll_time + (i + 1) * time_per_pulse;
+                process_midi_clock_usb(MIDI_CLOCK, synthetic_timestamp);
+            }
+        }
+        usb_midi_tracking.last_clock_count = current_clock_count;
+    } else {
+        // If last_clock_count is greater, it means either core0 was reset or the counter overflowed.
+        // Therefore, restore sanity.
+        usb_midi_tracking.last_clock_count = current_clock_count;
+    }
+
+    // Process transport messages (these are infrequent, use current timestamp)
+    if (current_start_count > usb_midi_tracking.last_start_count) {
+        process_midi_clock_usb(MIDI_START, now);
+        usb_midi_tracking.last_start_count = current_start_count;
+    }
+
+    if (current_continue_count > usb_midi_tracking.last_continue_count) {
+        process_midi_clock_usb(MIDI_CONTINUE, now);
+        usb_midi_tracking.last_continue_count = current_continue_count;
+    }
+
+    if (current_stop_count > usb_midi_tracking.last_stop_count) {
+        process_midi_clock_usb(MIDI_STOP, now);
+        usb_midi_tracking.last_stop_count = current_stop_count;
+    }
+}
+
 // Core1 main function that runs the infinite loop
 static void __not_in_flash_func(denkioto_core1_main)(void) {
     core1_running = true;
 
-    // Disable all interrupts on core1 except our touch ring DMA interrupt
-    for (int irq_num = 0; irq_num < 32; irq_num++) {
+    // Disable all interrupts on core1
+    for (unsigned int irq_num = 0; irq_num < NUM_IRQS; irq_num++) {
         irq_set_enabled(irq_num, false);
     }
+
+    // Initialize Core 1 to be interruptible for flash write protection
+    multicore_lockout_victim_init();
+    irq_set_priority(SIO_FIFO_IRQ_NUM(1), PICO_HIGHEST_IRQ_PRIORITY);
 
     // Enable DMA_IRQ_1 for touch ring channels
     irq_set_exclusive_handler(DMA_IRQ_1, touch_ring_dma_irq_handler);
     irq_set_enabled(DMA_IRQ_1, true);
+    irq_set_priority(DMA_IRQ_1, PICO_LOWEST_IRQ_PRIORITY);
+
+    setup_uart_midi();
 
     while (!core1_should_stop) {
         // Atomic increment of the counter
@@ -223,11 +618,17 @@ static void __not_in_flash_func(denkioto_core1_main)(void) {
             }
         }
 
+        // Poll USB MIDI for clock messages
+        core1_usb_midi_poll();
+
         tight_loop_contents();
     }
 
-    // Disable DMA IRQ before exiting
+    // Disable used IRQs before exiting
+    irq_set_enabled(UART0_IRQ, false);
     irq_set_enabled(DMA_IRQ_1, false);
+    multicore_lockout_victim_deinit();
+
     core1_running = false;
 }
 
@@ -253,6 +654,15 @@ void denkioto_multicore_init(void) {
         memset(RingVals_stable[ring], 0, sizeof(RingVals_stable[ring]));
         __atomic_store_n(&ring_data_state[ring], 0, __ATOMIC_SEQ_CST);
     }
+
+    // Reset DMA channels to -1 to ensure proper initialization
+    for (int i = 0; i < 4; i++) {
+        dma_channels[i] = -1;
+    }
+
+    // Core0 also needs this
+    multicore_lockout_victim_init();
+    irq_set_priority(SIO_FIFO_IRQ_NUM(0), PICO_HIGHEST_IRQ_PRIORITY);
 }
 
 void denkioto_multicore_start_core1(void) {
@@ -263,6 +673,15 @@ void denkioto_multicore_start_core1(void) {
 
     // Reset stop flag
     core1_should_stop = false;
+
+    // Enable 5V power for DIN MIDI IN circuit
+    gpio_init(POWENABLE_PIN);
+    gpio_set_dir(POWENABLE_PIN, GPIO_OUT);
+    gpio_put(POWENABLE_PIN, true);
+
+    // Initialize MIDI clock state
+    init_midi_clock_state();
+    init_usb_midi_tracking();
 
     // Set up PIO to read touch rings
     uart_pio_offset = pio_add_program(uart_pio, &uart_rx_program);
@@ -296,14 +715,15 @@ int32_t denkioto_multicore_stop_core1(int where) {
     // Signal core1 to stop
     core1_should_stop = true;
 
-    long retries = 500000;
-    while (core1_running && retries > 0) {
-        retries--;
+    // This looks like it might wait forever, but we need to let core1 clean up its IRQs
+    long cycles_waiting = 0;
+    while (core1_running) {
+        cycles_waiting++;
         tight_loop_contents();
     }
 
-    printf("Before core reset: core1_running: %d, core1_should_stop: %d, retries left: %ld\n",
-        core1_running, core1_should_stop, retries);
+    printf("Before core reset: core1_running: %d, core1_should_stop: %d, cycles waiting: %ld\n",
+        core1_running, core1_should_stop, cycles_waiting);
 
     // Stop all DMA channels
     for (int ring = 0; ring < 4; ring++) {
@@ -314,6 +734,21 @@ int32_t denkioto_multicore_stop_core1(int where) {
             dma_channels[ring] = -1;
         }
     }
+
+    // Disable IRQs on Core 0 that were set up for multicore operation
+    irq_set_enabled(DMA_IRQ_1, false);
+    irq_set_enabled(UART0_IRQ, false);
+
+    // Deinitialize UART0 to clean up MIDI UART state
+    uart_deinit(uart0);
+
+    // Reset MIDI clock state and USB tracking to clean state
+    init_midi_clock_state();
+    init_usb_midi_tracking();
+
+    // Disable 5V power to MIDI IN circuit
+    gpio_put(POWENABLE_PIN, false);
+    gpio_deinit(POWENABLE_PIN);
 
     // Stop and reset PIO state machines
     pio_sm_set_enabled(uart_pio, uart0_sm, false);
@@ -340,9 +775,9 @@ int32_t denkioto_multicore_stop_core1(int where) {
     // Force reset our state variables after core reset
     denkioto_multicore_init();
 
-    printf("denkioto_multicore_stop_core1() called, where: %d, retries left: %ld\n", where, retries);
+    printf("denkioto_multicore_stop_core1() called, where: %d, cycles waiting: %ld\n", where, cycles_waiting);
 
-    return retries;
+    return cycles_waiting;
 }
 
 uint32_t denkioto_multicore_get_counter(void) {
@@ -350,11 +785,53 @@ uint32_t denkioto_multicore_get_counter(void) {
 }
 
 bool denkioto_multicore_is_core1_running(void) {
-    printf("denkioto_multicore_is_core1_running() called, core1_running: %d\n", core1_running);
-    for (int irq_num = 0; irq_num < 26; irq_num++) {
-        printf("is IRQ %d enabled? %d\n", irq_num, irq_is_enabled(irq_num));
-    }
     return core1_running;
+}
+
+// Reset TinyUSB atomic MIDI counters (called from core0 during port reset)
+void denkioto_reset_usb_midi_counters(void) {
+    __atomic_store_n(&usb_midi_clock_count, 0, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&usb_midi_start_count, 0, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&usb_midi_continue_count, 0, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&usb_midi_stop_count, 0, __ATOMIC_SEQ_CST);
+}
+
+void denkioto_multicore_print_debug_stats(void) {
+    printf("=== Core1 Debug Statistics ===\n");
+    printf("core1_running: %d\n", core1_running);
+    printf("core1_should_stop: %d\n", core1_should_stop);
+    printf("core1_counter: %lu\n", (unsigned long)denkioto_multicore_get_counter());
+
+    printf("\n=== IRQ Status ===\n");
+    for (unsigned int irq_num = 0; irq_num < NUM_IRQS; irq_num++) {
+        if (irq_is_enabled(irq_num)) {
+            printf("IRQ %u: enabled\n", irq_num);
+        }
+    }
+
+    printf("\n=== MIDI Clock Status ===\n");
+    printf("BPM: %lu.%03lu\n",
+        (unsigned long)(midi_clock_state.current_bpm_x1000 / 1000),
+        (unsigned long)(midi_clock_state.current_bpm_x1000 % 1000));
+    printf("Transport: %d (0=stop, 1=play, 2=pause)\n", midi_clock_state.transport_state);
+    printf("Active source: %d (0=none, 1=uart, 2=usb)\n", midi_clock_state.active_source);
+    printf("Clock count: %lu\n", (unsigned long)midi_clock_state.clock_count);
+    printf("Core1 clock count: %lu\n", (unsigned long)midi_clock_state.core1_clock_count);
+    printf("Core0 filtered count: %lu\n", (unsigned long)midi_clock_state.core0_filtered_count);
+
+    printf("\n=== Touch Ring Status ===\n");
+    for (int ring = 0; ring < 4; ring++) {
+        int non_zero = 0;
+        for (int i = 0; i < 25; i++) {
+            if (RingVals_stable[ring][i] > 0) {
+                non_zero++;
+            }
+        }
+        printf("Ring %d: %d/25 active, state=%lu, resync=%ld, ready=%ld\n",
+            ring, non_zero, (unsigned long)ring_data_state[ring],
+            ring_buffers[ring].resync_count, ring_buffers[ring].data_ready_count);
+    }
+    printf("===============================\n");
 }
 
 void denkioto_multicore_reset_counter(void) {
@@ -479,4 +956,75 @@ long denkioto_multicore_get_data_ready_count(int ring) {
         return -1;  // Invalid parameter
     }
     return __atomic_load_n(&ring_buffers[ring].data_ready_count, __ATOMIC_SEQ_CST);
+}
+
+// Update filtered count (called from Core 0)
+void denkioto_multicore_update_filtered_count(void) {
+    __atomic_add_fetch(&midi_clock_state.core0_filtered_count, 1, __ATOMIC_SEQ_CST);
+}
+
+
+uint32_t denkioto_multicore_get_midi_bpm_x1000(void) {
+    return __atomic_load_n(&midi_clock_state.current_bpm_x1000, __ATOMIC_SEQ_CST);
+}
+
+uint8_t denkioto_multicore_get_transport_state(void) {
+    return __atomic_load_n(&midi_clock_state.transport_state, __ATOMIC_SEQ_CST);
+}
+
+uint8_t denkioto_multicore_get_clock_source(void) {
+    uint8_t source = __atomic_load_n(&midi_clock_state.active_source, __ATOMIC_SEQ_CST);
+
+    // Check for source timeout
+    uint64_t now = time_us_64();
+    if (source > 0 && source <= 2) {
+        uint64_t last_seen = __atomic_load_n(&midi_clock_state.last_source_seen[source], __ATOMIC_SEQ_CST);
+        if (now - last_seen > CLOCK_SOURCE_TIMEOUT_US) {
+            // Source has timed out
+            __atomic_store_n(&midi_clock_state.active_source, 0, __ATOMIC_SEQ_CST);
+            return 0;  // No active source
+        }
+    }
+
+    return source;
+}
+
+void denkioto_multicore_set_clock_source_priority(uint8_t uart_priority, uint8_t usb_priority) {
+    // Ensure priorities are valid (1 or 2) and different
+    if ((uart_priority == 1 || uart_priority == 2) &&
+        (usb_priority == 1 || usb_priority == 2) &&
+        uart_priority != usb_priority) {
+        midi_clock_state.source_priority[0] = uart_priority;
+        midi_clock_state.source_priority[1] = usb_priority;
+    }
+}
+
+// Pause Core 1 before flash writes
+void denkioto_multicore_pause(void) {
+    if (!core1_running) {
+        return;  // Nothing to pause
+    }
+
+    if (!multicore_lockout_victim_is_initialized(1)) {
+        printf("Core 1 not initialized to be interruptible, cannot pause.\n");
+        return;
+    }
+
+    multicore_lockout_start_blocking();
+    printf("Core 1 paused for flash writes.\n");
+}
+
+// Resume Core 1 after flash writes
+void denkioto_multicore_resume(void) {
+    if (!core1_running) {
+        return;  // Nothing to resume
+    }
+
+    if (!multicore_lockout_victim_is_initialized(1)) {
+        printf("Core 1 not initialized to be interruptible, cannot resume.\n");
+        return;
+    }
+
+    multicore_lockout_end_blocking();
+    printf("Core 1 resumed after flash writes.\n");
 }

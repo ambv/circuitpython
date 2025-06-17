@@ -23,6 +23,10 @@
 #include "supervisor/flash.h"
 #include "supervisor/usb.h"
 
+#ifdef BOARD_DENKIOTO_RIN_RP2040
+#include "denkioto/multicore.h"
+#endif
+
 #ifdef PICO_RP2350
 #include "hardware/structs/qmi.h"
 #endif
@@ -45,6 +49,11 @@ static uint32_t _audio_channel_mask;
 #endif
 
 void supervisor_flash_pre_write(void) {
+    #ifdef BOARD_DENKIOTO_RIN_RP2040
+    // Pause multicore operations before disabling interrupts
+    denkioto_multicore_pause();
+    #endif
+
     // Disable interrupts. XIP accesses will fault during flash writes.
     common_hal_mcu_disable_interrupts();
     #if CIRCUITPY_AUDIOCORE
@@ -60,6 +69,11 @@ void supervisor_flash_post_write(void) {
     #endif
     // Re-enable interrupts.
     common_hal_mcu_enable_interrupts();
+
+    #ifdef BOARD_DENKIOTO_RIN_RP2040
+    // Resume multicore operations after re-enabling interrupts
+    denkioto_multicore_resume();
+    #endif
 }
 
 void supervisor_flash_init(void) {

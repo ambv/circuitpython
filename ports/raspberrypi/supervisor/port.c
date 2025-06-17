@@ -34,6 +34,10 @@
 #include "common-hal/rtc/RTC.h"
 #include "common-hal/busio/UART.h"
 
+#ifdef BOARD_DENKIOTO_RIN_RP2040
+#include "boards/denkioto_rin_rp2040/denkioto/multicore.h"
+#endif
+
 #include "supervisor/shared/safe_mode.h"
 #include "supervisor/shared/stack.h"
 #include "supervisor/shared/tick.h"
@@ -435,6 +439,11 @@ void reset_port(void) {
     wifi_reset();
     #endif
 
+    #ifdef BOARD_DENKIOTO_RIN_RP2040
+    // Reset TinyUSB atomic MIDI counters on board reset
+    denkioto_reset_usb_midi_counters();
+    #endif
+
     reset_all_pins();
 }
 
@@ -574,6 +583,9 @@ void port_idle_until_interrupt(void) {
  */
 extern NORETURN void isr_hardfault(void); // provide a prototype to avoid a missing-prototypes diagnostic
 __attribute__((used)) void __not_in_flash_func(isr_hardfault)(void) {
+    if ((*(volatile uint32_t *)0xE000EDF0) & (1 << 0)) {
+        __asm("bkpt 1");
+    }
     // Only safe mode from core 0 which is running CircuitPython. Core 1 faulting
     // should not be fatal to CP. (Fingers crossed.)
     if (get_core_num() == 0) {

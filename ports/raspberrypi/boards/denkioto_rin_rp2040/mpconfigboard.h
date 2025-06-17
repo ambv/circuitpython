@@ -1,6 +1,9 @@
 #define MICROPY_HW_BOARD_NAME "denki-oto rin"
 #define MICROPY_HW_MCU_NAME "rp2040"
 
+// Board identification for conditional compilation
+#define BOARD_DENKIOTO_RIN_RP2040 1
+
 #define CIRCUITPY_STATUS_LED_POWER (&pin_GPIO16)
 
 #define DEFAULT_I2C_BUS_SDA (&pin_GPIO10)

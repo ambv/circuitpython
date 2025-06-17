@@ -28,10 +28,7 @@
 #include "denkioto/multicore.h"
 
 // Use the MP_WEAK supervisor/shared/board.c versions of routines not defined here.
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunused-variable"
 static timer_hw_t *pico_timer = PICO_DEFAULT_TIMER_INSTANCE();
-#pragma GCC diagnostic pop
 
 void board_init(void) {
     pico_timer->dbgpause = 0;

@@ -26,4 +26,45 @@ void denkioto_multicore_clear_ring_values(int ring);
 long denkioto_multicore_get_resync_count(int ring);
 long denkioto_multicore_get_data_ready_count(int ring);
 
+// MIDI clock accessor functions
+uint32_t denkioto_multicore_get_midi_bpm_x1000(void);
+uint8_t denkioto_multicore_get_transport_state(void);
+uint8_t denkioto_multicore_get_clock_source(void);
+void denkioto_multicore_set_clock_source_priority(uint8_t uart_priority, uint8_t usb_priority);
+
+// Error monitoring
+void denkioto_multicore_update_filtered_count(void);
+
+// Debug functions
+void denkioto_multicore_print_debug_stats(void);
+
+// Access to TinyUSB atomic clock counters (declared in TinyUSB patch)
+extern volatile uint32_t usb_midi_clock_count;
+extern volatile uint32_t usb_midi_start_count;
+extern volatile uint32_t usb_midi_continue_count;
+extern volatile uint32_t usb_midi_stop_count;
+
+static inline uint32_t denkioto_get_usb_midi_clock_count(void) {
+    return __atomic_load_n(&usb_midi_clock_count, __ATOMIC_SEQ_CST);
+}
+
+static inline uint32_t denkioto_get_usb_midi_start_count(void) {
+    return __atomic_load_n(&usb_midi_start_count, __ATOMIC_SEQ_CST);
+}
+
+static inline uint32_t denkioto_get_usb_midi_continue_count(void) {
+    return __atomic_load_n(&usb_midi_continue_count, __ATOMIC_SEQ_CST);
+}
+
+static inline uint32_t denkioto_get_usb_midi_stop_count(void) {
+    return __atomic_load_n(&usb_midi_stop_count, __ATOMIC_SEQ_CST);
+}
+
+// Reset TinyUSB atomic MIDI counters (called during board reset)
+void denkioto_reset_usb_midi_counters(void);
+
+// Flash write protection - lockout Core 1 during flash operations
+void denkioto_multicore_pause(void);
+void denkioto_multicore_resume(void);
+
 #endif // DENKIOTO_MULTICORE_H

@@ -1,0 +1,80 @@
+From 65cfaa7f0c30f00435fce3f1b9ee2b82f38a5792 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C5=81ukasz=20Langa?= <lukasz@langa.pl>
+Date: Wed, 18 Jun 2025 00:30:15 +0200
+Subject: [PATCH] Filter MIDI clock messages before FIFO for RP2040
+
+This patch adds support for filtering MIDI clock messages (0xF8, 0xFA, 0xFB, 0xFC)
+at the USB data reception level before they enter the FIFO. This prevents FIFO
+overflow when Python is not consuming MIDI data fast enough.
+
+For the Denkioto Rin RP2040 board, clock messages are counted atomically
+and handled by Core 1 for precise timing, while other MIDI messages
+are passed through to the FIFO for Python processing on Core 0.
+---
+ src/class/midi/midi_device.c | 44 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 44 insertions(+)
+
+diff --git a/src/class/midi/midi_device.c b/src/class/midi/midi_device.c
+index 0bbb3caf4..d2a498515 100644
+--- a/src/class/midi/midi_device.c
++++ b/src/class/midi/midi_device.c
+@@ -506,6 +506,17 @@ bool midid_control_xfer_cb(uint8_t rhport, uint8_t stage, const tusb_control_req
+   return false; // driver doesn't support any request yet
+ }
+
++// Board-specific clock filtering support
++#ifdef BOARD_DENKIOTO_RIN_RP2040
++// Atomic counters for each clock message type
++// These are incremented by Core 0 (USB IRQ) and read by Core 1
++volatile uint32_t usb_midi_clock_count = 0;
++volatile uint32_t usb_midi_start_count = 0;
++volatile uint32_t usb_midi_continue_count = 0;
++volatile uint32_t usb_midi_stop_count = 0;
++extern bool denkioto_multicore_is_core1_running(void);
++#endif
++
+ bool midid_xfer_cb(uint8_t rhport, uint8_t ep_addr, xfer_result_t result, uint32_t xferred_bytes)
+ {
+   (void) result;
+@@ -525,6 +536,39 @@ bool midid_xfer_cb(uint8_t rhport, uint8_t ep_addr, xfer_result_t result, uint32
+
+   // receive new data
+   if (ep_addr == p_midi->ep_out) {
++#ifdef BOARD_DENKIOTO_RIN_RP2040
++    // Filter MIDI clock messages when Core 1 is handling them
++    if (denkioto_multicore_is_core1_running()) {
++      uint8_t* src = _midid_epbuf[idx].epout;
++      uint8_t filtered_buf[CFG_TUD_MIDI_EP_BUFSIZE];
++      uint16_t filtered_bytes = 0;
++
++      // Process in 4-byte MIDI packets
++      for (uint32_t i = 0; i + 3 < xferred_bytes; i += 4) {
++        uint8_t msg_type = src[i + 1];  // MIDI message is at byte 1 of packet
++
++        // Check if this is a clock message
++        if (msg_type == 0xF8) {  // Timing Clock
++          __atomic_add_fetch(&usb_midi_clock_count, 1, __ATOMIC_SEQ_CST);
++        } else if (msg_type == 0xFA) {  // Start
++          __atomic_add_fetch(&usb_midi_start_count, 1, __ATOMIC_SEQ_CST);
++        } else if (msg_type == 0xFB) {  // Continue
++          __atomic_add_fetch(&usb_midi_continue_count, 1, __ATOMIC_SEQ_CST);
++        } else if (msg_type == 0xFC) {  // Stop
++          __atomic_add_fetch(&usb_midi_stop_count, 1, __ATOMIC_SEQ_CST);
++        } else {
++          // Not a clock message, copy to filtered buffer
++          memcpy(filtered_buf + filtered_bytes, src + i, 4);
++          filtered_bytes += 4;
++        }
++      }
++
++      // Write only non-clock messages to FIFO
++      if (filtered_bytes > 0) {
++        tu_fifo_write_n(&p_midi->rx_ff, filtered_buf, filtered_bytes);
++      }
++    } else
++#endif
+     tu_fifo_write_n(&p_midi->rx_ff, _midid_epbuf[idx].epout, (uint16_t)xferred_bytes);
+
+     // invoke receive callback if available
+--
+2.49.0
