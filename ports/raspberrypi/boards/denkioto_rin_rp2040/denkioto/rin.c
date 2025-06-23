@@ -10,6 +10,11 @@
 
 #include "multicore.h"
 
+// Define MIDI source constants for Python module
+#define MIDI_SOURCE_NONE 0
+#define MIDI_SOURCE_UART 1
+#define MIDI_SOURCE_USB 2
+
 //| """Multicore functionality for the denkioto_rin_rp2040 board.
 //|
 //| This module provides access to the RP2040's second core (core1) functionality.
@@ -134,22 +139,18 @@ static mp_obj_t denkioto_rin_get_transport_state_func(void) {
 static MP_DEFINE_CONST_FUN_OBJ_0(denkioto_rin_get_transport_state_obj, denkioto_rin_get_transport_state_func);
 
 static mp_obj_t denkioto_rin_get_clock_source_func(void) {
-    // | def get_clock_source() -> str:
+    // | def get_clock_source() -> int | None:
     // |     """Get the currently active MIDI clock source.
     // |
-    // |     :return: "uart", "usb", or "none"
+    // |     :return: MIDI_UART, MIDI_USB, or None
     // |     """
     // |     ...
     // |
     uint8_t source = denkioto_multicore_get_clock_source();
-    switch (source) {
-        case 1:
-            return mp_obj_new_str("uart", 4);
-        case 2:
-            return mp_obj_new_str("usb", 3);
-        default:
-            return mp_obj_new_str("none", 4);
+    if (source == 0) {
+        return mp_const_none;
     }
+    return mp_obj_new_int(source);
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(denkioto_rin_get_clock_source_obj, denkioto_rin_get_clock_source_func);
 
@@ -172,11 +173,45 @@ static mp_obj_t denkioto_rin_get_clock_precision_func(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(denkioto_rin_get_clock_precision_obj, denkioto_rin_get_clock_precision_func);
 
+static mp_obj_t denkioto_rin_get_clock_count_func(mp_obj_t source_obj) {
+    // | def get_clock_count(source: int) -> int:
+    // |     """Get the MIDI clock count for a specific source.
+    // |
+    // |     :param source: MIDI source (MIDI_UART or MIDI_USB)
+    // |     :return: Clock count since last transport start
+    // |     """
+    // |     ...
+    // |
+    mp_int_t source = mp_obj_get_int(source_obj);
+    if (source < 0 || source > 2) {
+        mp_raise_ValueError(MP_ERROR_TEXT("Invalid MIDI source"));
+    }
+    return mp_obj_new_int_from_uint(denkioto_multicore_get_clock_count((uint8_t)source));
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(denkioto_rin_get_clock_count_obj, denkioto_rin_get_clock_count_func);
+
+static mp_obj_t denkioto_rin_get_beat_count_func(mp_obj_t source_obj) {
+    // | def get_beat_count(source: int) -> int:
+    // |     """Get the MIDI beat count for a specific source.
+    // |
+    // |     :param source: MIDI source (MIDI_UART or MIDI_USB)
+    // |     :return: Beat count since last transport start (6 clocks = 1 beat)
+    // |     """
+    // |     ...
+    // |
+    mp_int_t source = mp_obj_get_int(source_obj);
+    if (source < 0 || source > 2) {
+        mp_raise_ValueError(MP_ERROR_TEXT("Invalid MIDI source"));
+    }
+    return mp_obj_new_int_from_uint(denkioto_multicore_get_beat_count((uint8_t)source));
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(denkioto_rin_get_beat_count_obj, denkioto_rin_get_beat_count_func);
+
 static mp_obj_t denkioto_rin_set_clock_source_priority_func(mp_obj_t sources_obj) {
-    // | def set_clock_source_priority(sources: list[str]) -> None:
+    // | def set_clock_source_priority(sources: list[int]) -> None:
     // |     """Set the priority order for MIDI clock sources.
     // |
-    // |     :param sources: List of source names in priority order, e.g. ['uart', 'usb']
+    // |     :param sources: List of source constants in priority order, e.g. [MIDI_UART, MIDI_USB]
     // |     """
     // |     ...
     // |
@@ -189,10 +224,10 @@ static mp_obj_t denkioto_rin_set_clock_source_priority_func(mp_obj_t sources_obj
         uint8_t usb_priority = 0;
 
         for (size_t i = 0; i < len && i < 2; i++) {
-            const char *source = mp_obj_str_get_str(items[i]);
-            if (strcmp(source, "uart") == 0) {
+            mp_int_t source = mp_obj_get_int(items[i]);
+            if (source == MIDI_SOURCE_UART) {
                 uart_priority = i + 1;
-            } else if (strcmp(source, "usb") == 0) {
+            } else if (source == MIDI_SOURCE_USB) {
                 usb_priority = i + 1;
             }
         }
@@ -316,7 +351,13 @@ static const mp_rom_map_elem_t denkioto_rin_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_get_transport_state), MP_ROM_PTR(&denkioto_rin_get_transport_state_obj) },
     { MP_ROM_QSTR(MP_QSTR_get_clock_source), MP_ROM_PTR(&denkioto_rin_get_clock_source_obj) },
     { MP_ROM_QSTR(MP_QSTR_get_clock_precision), MP_ROM_PTR(&denkioto_rin_get_clock_precision_obj) },
+    { MP_ROM_QSTR(MP_QSTR_get_clock_count), MP_ROM_PTR(&denkioto_rin_get_clock_count_obj) },
+    { MP_ROM_QSTR(MP_QSTR_get_beat_count), MP_ROM_PTR(&denkioto_rin_get_beat_count_obj) },
     { MP_ROM_QSTR(MP_QSTR_set_clock_source_priority), MP_ROM_PTR(&denkioto_rin_set_clock_source_priority_obj) },
+
+    // MIDI source constants
+    { MP_ROM_QSTR(MP_QSTR_MIDI_UART), MP_ROM_INT(MIDI_SOURCE_UART) },
+    { MP_ROM_QSTR(MP_QSTR_MIDI_USB), MP_ROM_INT(MIDI_SOURCE_USB) },
 };
 
 static MP_DEFINE_CONST_DICT(denkioto_rin_module_globals, denkioto_rin_module_globals_table);

@@ -110,6 +110,17 @@ static dma_channel_config dma_configs[4];
 #define MIDI_START 0xFA
 #define MIDI_CONTINUE 0xFB
 #define MIDI_STOP 0xFC
+#define MIDI_SPP 0xF2
+
+// Transport state definitions
+#define TRANSPORT_STOPPED 0
+#define TRANSPORT_PLAYING 1
+#define TRANSPORT_PAUSED 2
+
+// MIDI source definitions
+#define MIDI_SOURCE_NONE 0
+#define MIDI_SOURCE_UART 1
+#define MIDI_SOURCE_USB 2
 
 // Two-stage filter constants for BPM stability
 #define BPM_SHORT_WINDOW 8   // For detecting tempo changes (8 clocks = 1/3 beat)
@@ -122,7 +133,8 @@ typedef struct {
     volatile uint8_t active_source;          // 0=none, 1=uart, 2=usb
     volatile uint64_t last_clock_timestamp_uart;  // UART-specific timestamp
     volatile uint64_t last_clock_timestamp_usb;   // USB-specific timestamp
-    volatile uint32_t clock_count;           // Since transport start
+    volatile uint32_t clock_count[3];        // Clock count per source [none, uart, usb]
+    volatile uint32_t beat_count[3];         // Beat count per source [none, uart, usb] (6 clocks = 1 beat)
     volatile uint8_t source_priority[2];     // [uart=1, usb=2] priority order
     volatile uint64_t last_source_seen[3];   // Timestamp when each source was last seen
     volatile uint32_t core1_clock_count;     // Clocks processed by Core 1
@@ -141,16 +153,21 @@ static unified_midi_clock_t midi_clock_state;
 // Initialize MIDI clock state to default values
 static void init_midi_clock_state(void) {
     midi_clock_state.current_bpm_x1000 = 120000;  // Default 120 BPM
-    midi_clock_state.transport_state = 0;          // Stopped
-    midi_clock_state.active_source = 0;            // None
+    midi_clock_state.transport_state = TRANSPORT_STOPPED;
+    midi_clock_state.active_source = MIDI_SOURCE_NONE;
     midi_clock_state.last_clock_timestamp_uart = 0;
     midi_clock_state.last_clock_timestamp_usb = 0;
-    midi_clock_state.clock_count = 0;
+    midi_clock_state.clock_count[MIDI_SOURCE_NONE] = 0;
+    midi_clock_state.clock_count[MIDI_SOURCE_UART] = 0;
+    midi_clock_state.clock_count[MIDI_SOURCE_USB] = 0;
+    midi_clock_state.beat_count[MIDI_SOURCE_NONE] = 0;
+    midi_clock_state.beat_count[MIDI_SOURCE_UART] = 0;
+    midi_clock_state.beat_count[MIDI_SOURCE_USB] = 0;
     midi_clock_state.source_priority[0] = 1;       // UART first
     midi_clock_state.source_priority[1] = 2;       // USB second
-    midi_clock_state.last_source_seen[0] = 0;
-    midi_clock_state.last_source_seen[1] = 0;
-    midi_clock_state.last_source_seen[2] = 0;
+    midi_clock_state.last_source_seen[MIDI_SOURCE_NONE] = 0;
+    midi_clock_state.last_source_seen[MIDI_SOURCE_UART] = 0;
+    midi_clock_state.last_source_seen[MIDI_SOURCE_USB] = 0;
     midi_clock_state.core1_clock_count = 0;
     midi_clock_state.core0_filtered_count = 0;
     midi_clock_state.error_count = 0;
@@ -171,6 +188,15 @@ static void init_midi_clock_state(void) {
 #define CLOCK_SOURCE_TIMEOUT_US 500000
 
 static volatile uint64_t last_usb_poll_time = 0;
+
+// MIDI parsing state for SPP messages
+typedef struct {
+    uint8_t state;           // 0=waiting for status, 1=got F2, need LSB, 2=got F2+LSB, need MSB
+    uint8_t spp_lsb;         // LSB of SPP position
+    uint8_t spp_msb;         // MSB of SPP position
+} midi_spp_parser_state_t;
+
+static midi_spp_parser_state_t spp_parsers[3] = {0}; // Indexed by MIDI_SOURCE_*
 
 // USB MIDI clock tracking state
 static struct {
@@ -194,7 +220,8 @@ static void __not_in_flash_func(denkioto_core1_main)(void);
 static void setup_dma_for_ring(int ring);
 static void update_stable_ring_data(void);
 static inline void process_midi_clock_uart(uint64_t timestamp);
-static inline void process_transport_message(uint8_t message, uint64_t timestamp);
+static inline void process_transport_message_uart(uint8_t message, uint64_t timestamp);
+static void process_spp_message(uint16_t spp_position, uint8_t source);
 static void process_midi_clock_usb(uint8_t message, uint64_t timestamp);
 static void setup_uart_midi(void);
 static void midi_uart_irq_handler(void);
@@ -256,9 +283,26 @@ static void __isr __not_in_flash_func(midi_uart_irq_handler)(void) {
         uint8_t byte = uart_getc(uart0);
 
         if (byte == MIDI_CLOCK) {
+            spp_parsers[MIDI_SOURCE_UART].state = 0;  // Reset SPP parser on clock
             process_midi_clock_uart(timestamp);
         } else if (byte == MIDI_START || byte == MIDI_CONTINUE || byte == MIDI_STOP) {
-            process_transport_message(byte, timestamp);
+            spp_parsers[MIDI_SOURCE_UART].state = 0;  // Reset SPP parser on transport
+            process_transport_message_uart(byte, timestamp);
+        } else if (byte == MIDI_SPP) {
+            spp_parsers[MIDI_SOURCE_UART].state = 1;  // Expecting LSB next
+        } else if (spp_parsers[MIDI_SOURCE_UART].state == 1 && (byte & 0x80) == 0) {
+            // Got LSB data byte (must have MSB clear)
+            spp_parsers[MIDI_SOURCE_UART].spp_lsb = byte;
+            spp_parsers[MIDI_SOURCE_UART].state = 2;  // Expecting MSB next
+        } else if (spp_parsers[MIDI_SOURCE_UART].state == 2 && (byte & 0x80) == 0) {
+            // Got MSB data byte (must have MSB clear)
+            spp_parsers[MIDI_SOURCE_UART].spp_msb = byte;
+            uint16_t spp_position = spp_parsers[MIDI_SOURCE_UART].spp_lsb | (spp_parsers[MIDI_SOURCE_UART].spp_msb << 7);
+            process_spp_message(spp_position, MIDI_SOURCE_UART);
+            spp_parsers[MIDI_SOURCE_UART].state = 0;  // Reset parser
+        } else if (byte & 0x80) {
+            // Any status byte resets the parser
+            spp_parsers[MIDI_SOURCE_UART].state = 0;
         }
         // Other MIDI messages are ignored by Core 1 - Core 0 will handle them
     }
@@ -343,19 +387,23 @@ static inline void update_bpm_with_interval(uint64_t interval, uint8_t source) {
 
 static inline void process_midi_clock_uart(uint64_t timestamp) {
     // Calculate BPM from clock interval (24 clocks per quarter note)
-    if (midi_clock_state.transport_state == 1 && midi_clock_state.last_clock_timestamp_uart > 0) {
+    if (midi_clock_state.last_clock_timestamp_uart > 0) {
         uint64_t interval = timestamp - midi_clock_state.last_clock_timestamp_uart;
-        update_bpm_with_interval(interval, 1);  // UART = source 1
+        update_bpm_with_interval(interval, MIDI_SOURCE_UART);
     }
 
     midi_clock_state.last_clock_timestamp_uart = timestamp;
-    midi_clock_state.last_source_seen[1] = timestamp;  // UART = source 1
-    midi_clock_state.clock_count++;
-    midi_clock_state.core1_clock_count++;  // Track Core 1 processing
+    midi_clock_state.last_source_seen[MIDI_SOURCE_UART] = timestamp;
+    midi_clock_state.clock_count[MIDI_SOURCE_UART]++;
+    // Update beat count (6 clocks = 1 beat)
+    if (midi_clock_state.clock_count[MIDI_SOURCE_UART] % 6 == 0) {
+        midi_clock_state.beat_count[MIDI_SOURCE_UART]++;
+    }
+    midi_clock_state.core1_clock_count++;
 
     // Update active source if needed
-    if (midi_clock_state.active_source != 1) {
-        midi_clock_state.active_source = 1;  // UART is now active
+    if (midi_clock_state.active_source != MIDI_SOURCE_UART) {
+        midi_clock_state.active_source = MIDI_SOURCE_UART;
         // Reset filter state when switching to UART
         midi_clock_state.intervals_filled = 0;
         midi_clock_state.short_index = 0;
@@ -364,11 +412,16 @@ static inline void process_midi_clock_uart(uint64_t timestamp) {
 }
 
 // Process transport messages (Start/Stop/Continue)
-static inline void process_transport_message(uint8_t message, uint64_t timestamp) {
+static inline void process_transport_message_uart(uint8_t message, uint64_t timestamp) {
     switch (message) {
         case MIDI_START:
-            midi_clock_state.transport_state = 1;  // Playing
-            midi_clock_state.clock_count = 0;
+            midi_clock_state.transport_state = TRANSPORT_PLAYING;
+            midi_clock_state.clock_count[MIDI_SOURCE_NONE] = 0;
+            midi_clock_state.clock_count[MIDI_SOURCE_UART] = 0;
+            midi_clock_state.clock_count[MIDI_SOURCE_USB] = 0;
+            midi_clock_state.beat_count[MIDI_SOURCE_NONE] = 0;
+            midi_clock_state.beat_count[MIDI_SOURCE_UART] = 0;
+            midi_clock_state.beat_count[MIDI_SOURCE_USB] = 0;
             midi_clock_state.last_clock_timestamp_uart = 0;  // Reset for new BPM calculation
             midi_clock_state.last_clock_timestamp_usb = 0;   // Reset for new BPM calculation
             // Reset filter state for fresh start
@@ -377,13 +430,28 @@ static inline void process_transport_message(uint8_t message, uint64_t timestamp
             midi_clock_state.long_index = 0;
             break;
         case MIDI_STOP:
-            midi_clock_state.transport_state = 0;  // Stopped
+            midi_clock_state.transport_state = TRANSPORT_STOPPED;
             break;
         case MIDI_CONTINUE:
-            midi_clock_state.transport_state = 1;  // Playing
+            midi_clock_state.transport_state = TRANSPORT_PLAYING;
             break;
     }
-    midi_clock_state.last_source_seen[1] = timestamp;  // UART = source 1
+    midi_clock_state.last_source_seen[MIDI_SOURCE_UART] = timestamp;
+}
+
+// Process Song Position Pointer message
+static void process_spp_message(uint16_t spp_position, uint8_t source) {
+    // SPP position is in MIDI beats (1/16 notes)
+    // 1 MIDI beat = 6 MIDI clocks
+    // So clock_count = spp_position * 6
+    uint32_t clock_position = spp_position * 6;
+    uint32_t beat_position = spp_position;
+
+    // Update clock and beat counts for the source
+    if (source <= 2) {
+        midi_clock_state.clock_count[source] = clock_position;
+        midi_clock_state.beat_count[source] = beat_position;
+    }
 }
 
 // Setup UART for MIDI
@@ -421,23 +489,27 @@ static void setup_uart_midi(void) {
 static void __not_in_flash_func(process_midi_clock_usb)(uint8_t message, uint64_t timestamp) {
     if (message == MIDI_CLOCK) {
         // Calculate BPM from clock interval (24 clocks per quarter note)
-        if (midi_clock_state.transport_state == 1 && midi_clock_state.last_clock_timestamp_usb > 0) {
+        if (midi_clock_state.last_clock_timestamp_usb > 0) {
             uint64_t interval = timestamp - midi_clock_state.last_clock_timestamp_usb;
-            update_bpm_with_interval(interval, 2);  // USB = source 2
+            update_bpm_with_interval(interval, MIDI_SOURCE_USB);
         }
 
         midi_clock_state.last_clock_timestamp_usb = timestamp;
-        midi_clock_state.last_source_seen[2] = timestamp;  // USB = source 2
-        midi_clock_state.clock_count++;
-        midi_clock_state.core1_clock_count++;  // Track Core 1 processing
+        midi_clock_state.last_source_seen[MIDI_SOURCE_USB] = timestamp;
+        midi_clock_state.clock_count[MIDI_SOURCE_USB]++;
+        // Update beat count (6 clocks = 1 beat)
+        if (midi_clock_state.clock_count[MIDI_SOURCE_USB] % 6 == 0) {
+            midi_clock_state.beat_count[MIDI_SOURCE_USB]++;
+        }
+        midi_clock_state.core1_clock_count++;
 
         // Update active source based on priority
-        if (midi_clock_state.active_source != 2) {
+        if (midi_clock_state.active_source != MIDI_SOURCE_USB) {
             // Check if higher priority source (UART) is still active
-            uint64_t uart_last_seen = midi_clock_state.last_source_seen[1];
+            uint64_t uart_last_seen = midi_clock_state.last_source_seen[MIDI_SOURCE_UART];
             if (timestamp - uart_last_seen > CLOCK_SOURCE_TIMEOUT_US) {
                 // UART has timed out, USB can take over
-                midi_clock_state.active_source = 2;
+                midi_clock_state.active_source = MIDI_SOURCE_USB;
                 // Reset filter state when switching to USB
                 midi_clock_state.intervals_filled = 0;
                 midi_clock_state.short_index = 0;
@@ -448,8 +520,13 @@ static void __not_in_flash_func(process_midi_clock_usb)(uint8_t message, uint64_
         // Update transport state
         switch (message) {
             case MIDI_START:
-                midi_clock_state.transport_state = 1;  // Playing
-                midi_clock_state.clock_count = 0;
+                midi_clock_state.transport_state = TRANSPORT_PLAYING;
+                midi_clock_state.clock_count[MIDI_SOURCE_NONE] = 0;
+                midi_clock_state.clock_count[MIDI_SOURCE_UART] = 0;
+                midi_clock_state.clock_count[MIDI_SOURCE_USB] = 0;
+                midi_clock_state.beat_count[MIDI_SOURCE_NONE] = 0;
+                midi_clock_state.beat_count[MIDI_SOURCE_UART] = 0;
+                midi_clock_state.beat_count[MIDI_SOURCE_USB] = 0;
                 midi_clock_state.last_clock_timestamp_uart = 0;  // Reset for new BPM calculation
                 midi_clock_state.last_clock_timestamp_usb = 0;   // Reset for new BPM calculation
                 // Reset filter state for fresh start
@@ -458,13 +535,13 @@ static void __not_in_flash_func(process_midi_clock_usb)(uint8_t message, uint64_
                 midi_clock_state.long_index = 0;
                 break;
             case MIDI_STOP:
-                midi_clock_state.transport_state = 0;  // Stopped
+                midi_clock_state.transport_state = TRANSPORT_STOPPED;
                 break;
             case MIDI_CONTINUE:
-                midi_clock_state.transport_state = 1;  // Playing
+                midi_clock_state.transport_state = TRANSPORT_PLAYING;
                 break;
         }
-        midi_clock_state.last_source_seen[2] = timestamp;  // USB = source 2
+        midi_clock_state.last_source_seen[MIDI_SOURCE_USB] = timestamp;
     }
 }
 
@@ -815,7 +892,12 @@ void denkioto_multicore_print_debug_stats(void) {
         (unsigned long)(midi_clock_state.current_bpm_x1000 % 1000));
     printf("Transport: %d (0=stop, 1=play, 2=pause)\n", midi_clock_state.transport_state);
     printf("Active source: %d (0=none, 1=uart, 2=usb)\n", midi_clock_state.active_source);
-    printf("Clock count: %lu\n", (unsigned long)midi_clock_state.clock_count);
+    printf("Clock count UART: %lu, USB: %lu\n",
+        (unsigned long)midi_clock_state.clock_count[MIDI_SOURCE_UART],
+        (unsigned long)midi_clock_state.clock_count[MIDI_SOURCE_USB]);
+    printf("Beat count UART: %lu, USB: %lu\n",
+        (unsigned long)midi_clock_state.beat_count[MIDI_SOURCE_UART],
+        (unsigned long)midi_clock_state.beat_count[MIDI_SOURCE_USB]);
     printf("Core1 clock count: %lu\n", (unsigned long)midi_clock_state.core1_clock_count);
     printf("Core0 filtered count: %lu\n", (unsigned long)midi_clock_state.core0_filtered_count);
 
@@ -987,6 +1069,20 @@ uint8_t denkioto_multicore_get_clock_source(void) {
     }
 
     return source;
+}
+
+uint32_t denkioto_multicore_get_clock_count(uint8_t source) {
+    if (source > 2) {
+        return 0;  // Invalid source
+    }
+    return __atomic_load_n(&midi_clock_state.clock_count[source], __ATOMIC_SEQ_CST);
+}
+
+uint32_t denkioto_multicore_get_beat_count(uint8_t source) {
+    if (source > 2) {
+        return 0;  // Invalid source
+    }
+    return __atomic_load_n(&midi_clock_state.beat_count[source], __ATOMIC_SEQ_CST);
 }
 
 void denkioto_multicore_set_clock_source_priority(uint8_t uart_priority, uint8_t usb_priority) {

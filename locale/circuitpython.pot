@@ -1287,6 +1287,10 @@ msgstr ""
 msgid "Invalid MAC address"
 msgstr ""
 
+#: ports/raspberrypi/boards/denkioto_rin_rp2040/denkioto/rin.c
+msgid "Invalid MIDI source"
+msgstr ""
+
 #: ports/espressif/common-hal/espidf/__init__.c py/moderrno.c
 msgid "Invalid argument"
 msgstr ""
