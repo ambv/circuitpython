@@ -79,7 +79,6 @@ try:
         bpm = bpm_x1000 / 1000.0
         transport = denkioto_rin.get_transport_state()
         source = denkioto_rin.get_clock_source()
-        precision = denkioto_rin.get_clock_precision()
 
         # Transport state names
         transport_names = {0: "stopped", 1: "playing", 2: "paused"}
@@ -93,7 +92,7 @@ try:
             or message_count % 10 == 0
         ):
             print(
-                f"BPM: {bpm:6.1f} | Transport: {transport_name:8s} | Source: {source:4s} ({precision}) | Counter: {denkioto_rin.get_counter()}"
+                f"BPM: {bpm:6.1f} | Transport: {transport_name:8s} | Source: {source:4s} | Counter: {denkioto_rin.get_counter()}"
             )
 
             last_bpm = bpm

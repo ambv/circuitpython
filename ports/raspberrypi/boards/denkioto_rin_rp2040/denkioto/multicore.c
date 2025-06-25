@@ -139,7 +139,6 @@ typedef struct {
     volatile uint64_t last_source_seen[3];   // Timestamp when each source was last seen
     volatile uint32_t core1_clock_count;     // Clocks processed by Core 1
     volatile uint32_t core0_filtered_count;  // Clocks filtered by Core 0
-    volatile uint32_t error_count;           // Missed messages
     // Two-stage filter data
     volatile uint64_t short_intervals[BPM_SHORT_WINDOW];
     volatile uint64_t long_intervals[BPM_LONG_WINDOW];
@@ -170,7 +169,6 @@ static void init_midi_clock_state(void) {
     midi_clock_state.last_source_seen[MIDI_SOURCE_USB] = 0;
     midi_clock_state.core1_clock_count = 0;
     midi_clock_state.core0_filtered_count = 0;
-    midi_clock_state.error_count = 0;
 
     // Initialize two-stage filter
     for (int i = 0; i < BPM_SHORT_WINDOW; i++) {
@@ -206,12 +204,91 @@ static struct {
     uint32_t last_stop_count;
 } usb_midi_tracking = {0};
 
+// MIDI channel state structure
+typedef struct {
+    // Note velocities (0 = off, 1-127 = on with velocity)
+    volatile uint8_t notes[128];
+
+    // Control change values
+    volatile uint8_t cc[128];
+
+    // Polyphonic aftertouch (per-note pressure)
+    volatile uint8_t poly_pressure[128];
+
+    // Pitch bend (14-bit value: 0-16383, center = 8192)
+    volatile uint16_t pitch_bend;
+
+    // Channel pressure (aftertouch)
+    volatile uint8_t channel_pressure;
+
+    // Program change
+    volatile uint8_t program;
+
+    // Note status tracking for efficient Python polling
+    // Each bit represents one note: note_status[0] bits 0-31 = notes 0-31, etc.
+    volatile uint32_t note_status[4];  // 128 bits total, one per note
+
+    // Timestamp of last update
+    volatile uint64_t last_update;
+} midi_channel_t;
+
+// UART MIDI parser state
+typedef struct {
+    uint8_t state;          // Parser state
+    uint8_t status;         // Running status byte
+    uint8_t channel;        // Channel from status byte (0-15)
+    uint8_t data1;          // First data byte
+    uint8_t expected_bytes; // Number of data bytes expected
+    uint8_t received_bytes; // Number of data bytes received
+} midi_parser_t;
+
+// UART MIDI state - 16 channels
+static midi_channel_t uart_midi_state[16];
+static midi_parser_t uart_midi_parser = {0};
+
 static void init_usb_midi_tracking(void) {
     last_usb_poll_time = 0;
     usb_midi_tracking.last_clock_count = 0;
     usb_midi_tracking.last_start_count = 0;
     usb_midi_tracking.last_continue_count = 0;
     usb_midi_tracking.last_stop_count = 0;
+}
+
+// Initialize UART MIDI state
+static void init_uart_midi_state(void) {
+    for (int ch = 0; ch < 16; ch++) {
+        // Clear all note velocities
+        memset((void *)uart_midi_state[ch].notes, 0, 128);
+
+        // Initialize CC values to 0
+        memset((void *)uart_midi_state[ch].cc, 0, 128);
+
+        // Clear polyphonic aftertouch
+        memset((void *)uart_midi_state[ch].poly_pressure, 0, 128);
+
+        // Center pitch bend
+        uart_midi_state[ch].pitch_bend = 8192;
+
+        // Clear aftertouch
+        uart_midi_state[ch].channel_pressure = 0;
+
+        // Program 0
+        uart_midi_state[ch].program = 0;
+
+        // Clear note status
+        memset((void *)uart_midi_state[ch].note_status, 0, sizeof(uart_midi_state[ch].note_status));
+
+        // Clear timestamp
+        uart_midi_state[ch].last_update = 0;
+    }
+
+    // Reset parser
+    uart_midi_parser.state = 0;
+    uart_midi_parser.status = 0;
+    uart_midi_parser.channel = 0;
+    uart_midi_parser.data1 = 0;
+    uart_midi_parser.expected_bytes = 0;
+    uart_midi_parser.received_bytes = 0;
 }
 
 //
@@ -226,6 +303,117 @@ static void process_midi_clock_usb(uint8_t message, uint64_t timestamp);
 static void setup_uart_midi(void);
 static void midi_uart_irq_handler(void);
 static void core1_usb_midi_poll(void);
+
+// Helper functions for MIDI state updates
+static inline void update_note_status(uint8_t channel, uint8_t note) {
+    // Update the bit in note_status for this note
+    uint8_t array_index = note / 32;  // Which uint32_t (0-3)
+    uint8_t bit_index = note % 32;     // Which bit within that uint32_t
+
+    if (uart_midi_state[channel].notes[note] > 0) {
+        // Note is on - set the bit
+        uart_midi_state[channel].note_status[array_index] |= (1U << bit_index);
+    } else {
+        // Note is off - clear the bit
+        uart_midi_state[channel].note_status[array_index] &= ~(1U << bit_index);
+    }
+}
+
+// Helper function to clear all notes for a channel
+static void clear_all_notes(uint8_t channel) {
+    for (int note = 0; note < 128; note++) {
+        uart_midi_state[channel].notes[note] = 0;
+        update_note_status(channel, note);
+    }
+}
+
+// Helper function to reset controllers according to MIDI RP-015
+static void reset_all_controllers(uint8_t channel) {
+    // Set Expression (#11) to 127
+    uart_midi_state[channel].cc[11] = 127;
+
+    // Set Modulation (#1) to 0
+    uart_midi_state[channel].cc[1] = 0;
+
+    // Set Pedals (#64, #65, #66, #67) to 0
+    uart_midi_state[channel].cc[64] = 0;  // Sustain
+    uart_midi_state[channel].cc[65] = 0;  // Portamento
+    uart_midi_state[channel].cc[66] = 0;  // Sostenuto
+    uart_midi_state[channel].cc[67] = 0;  // Soft Pedal
+
+    // Set Registered and Non-registered parameter number LSB and MSB (#98-#101) to null (127)
+    uart_midi_state[channel].cc[98] = 127;   // NRPN LSB
+    uart_midi_state[channel].cc[99] = 127;   // NRPN MSB
+    uart_midi_state[channel].cc[100] = 127;  // RPN LSB
+    uart_midi_state[channel].cc[101] = 127;  // RPN MSB
+
+    // Set pitch bender to center (8192)
+    uart_midi_state[channel].pitch_bend = 8192;
+
+    // Reset channel pressure to 0
+    uart_midi_state[channel].channel_pressure = 0;
+
+    // Reset polyphonic pressure for all notes to 0
+    memset((void *)uart_midi_state[channel].poly_pressure, 0, 128);
+}
+
+// Process complete MIDI messages
+static void process_midi_message(uint8_t status, uint8_t data1, uint8_t data2, uint64_t timestamp) {
+    uint8_t msg_type = status & 0xF0;
+    uint8_t channel = status & 0x0F;
+
+    switch (msg_type) {
+        case 0x80:  // Note Off
+            uart_midi_state[channel].notes[data1] = 0;
+            update_note_status(channel, data1);
+            break;
+
+        case 0x90:  // Note On
+            uart_midi_state[channel].notes[data1] = (data2 == 0) ? 0 : data2;
+            update_note_status(channel, data1);
+            break;
+
+        case 0xA0:  // Polyphonic Aftertouch
+            uart_midi_state[channel].poly_pressure[data1] = data2;
+            break;
+
+        case 0xB0:  // Control Change
+            // Handle channel mode messages
+            if (data1 >= 120 && data1 <= 127) {
+                switch (data1) {
+                    case 120:  // All Sound Off
+                        clear_all_notes(channel);
+                        break;
+                    case 121:  // Reset All Controllers
+                        reset_all_controllers(channel);
+                        break;
+                    case 123:  // All Notes Off
+                        clear_all_notes(channel);
+                        break;
+                        // Other channel mode messages (122, 124-127) are ignored
+                        // as they don't affect stored state
+                }
+            } else {
+                // Regular control change
+                uart_midi_state[channel].cc[data1] = data2;
+            }
+            break;
+
+        case 0xC0:  // Program Change
+            uart_midi_state[channel].program = data1;
+            break;
+
+        case 0xD0:  // Channel Pressure
+            uart_midi_state[channel].channel_pressure = data1;
+            break;
+
+        case 0xE0:  // Pitch Bend
+            uart_midi_state[channel].pitch_bend = data1 | (data2 << 7);
+            break;
+    }
+
+    uart_midi_state[channel].last_update = timestamp;
+}
 
 // Touch ring DMA interrupt handler (uses DMA_IRQ_1)
 static void __isr __not_in_flash_func(touch_ring_dma_irq_handler)(void) {
@@ -282,29 +470,88 @@ static void __isr __not_in_flash_func(midi_uart_irq_handler)(void) {
         uint64_t timestamp = time_us_64();  // Microsecond precision
         uint8_t byte = uart_getc(uart0);
 
+        // Handle System Real Time messages (can occur anywhere)
         if (byte == MIDI_CLOCK) {
-            spp_parsers[MIDI_SOURCE_UART].state = 0;  // Reset SPP parser on clock
             process_midi_clock_uart(timestamp);
+            continue;
         } else if (byte == MIDI_START || byte == MIDI_CONTINUE || byte == MIDI_STOP) {
-            spp_parsers[MIDI_SOURCE_UART].state = 0;  // Reset SPP parser on transport
             process_transport_message_uart(byte, timestamp);
-        } else if (byte == MIDI_SPP) {
-            spp_parsers[MIDI_SOURCE_UART].state = 1;  // Expecting LSB next
-        } else if (spp_parsers[MIDI_SOURCE_UART].state == 1 && (byte & 0x80) == 0) {
-            // Got LSB data byte (must have MSB clear)
-            spp_parsers[MIDI_SOURCE_UART].spp_lsb = byte;
-            spp_parsers[MIDI_SOURCE_UART].state = 2;  // Expecting MSB next
-        } else if (spp_parsers[MIDI_SOURCE_UART].state == 2 && (byte & 0x80) == 0) {
-            // Got MSB data byte (must have MSB clear)
-            spp_parsers[MIDI_SOURCE_UART].spp_msb = byte;
-            uint16_t spp_position = spp_parsers[MIDI_SOURCE_UART].spp_lsb | (spp_parsers[MIDI_SOURCE_UART].spp_msb << 7);
-            process_spp_message(spp_position, MIDI_SOURCE_UART);
-            spp_parsers[MIDI_SOURCE_UART].state = 0;  // Reset parser
-        } else if (byte & 0x80) {
-            // Any status byte resets the parser
-            spp_parsers[MIDI_SOURCE_UART].state = 0;
+            continue;
         }
-        // Other MIDI messages are ignored by Core 1 - Core 0 will handle them
+
+        // Handle System Common messages
+        if (byte == MIDI_SPP) {
+            spp_parsers[MIDI_SOURCE_UART].state = 1;  // Expecting LSB next
+            uart_midi_parser.state = 0;  // Reset channel message parser
+            continue;
+        } else if (spp_parsers[MIDI_SOURCE_UART].state > 0) {
+            // Continue SPP parsing
+            if ((byte & 0x80) == 0) {  // Data byte
+                if (spp_parsers[MIDI_SOURCE_UART].state == 1) {
+                    spp_parsers[MIDI_SOURCE_UART].spp_lsb = byte;
+                    spp_parsers[MIDI_SOURCE_UART].state = 2;
+                } else if (spp_parsers[MIDI_SOURCE_UART].state == 2) {
+                    spp_parsers[MIDI_SOURCE_UART].spp_msb = byte;
+                    uint16_t spp_position = spp_parsers[MIDI_SOURCE_UART].spp_lsb | (spp_parsers[MIDI_SOURCE_UART].spp_msb << 7);
+                    process_spp_message(spp_position, MIDI_SOURCE_UART);
+                    spp_parsers[MIDI_SOURCE_UART].state = 0;
+                }
+            } else {
+                // Status byte resets SPP parser
+                spp_parsers[MIDI_SOURCE_UART].state = 0;
+                // Fall through to process this status byte
+            }
+        }
+
+        // Handle channel messages and running status
+        if (byte & 0x80) {
+            // Status byte
+            uint8_t msg_type = byte & 0xF0;
+
+            // Check if it's a channel message
+            if (msg_type >= 0x80 && msg_type <= 0xE0) {
+                uart_midi_parser.status = byte;
+                uart_midi_parser.channel = byte & 0x0F;
+                uart_midi_parser.received_bytes = 0;
+
+                // Determine expected data bytes
+                switch (msg_type) {
+                    case 0xC0:  // Program Change
+                    case 0xD0:  // Channel Pressure
+                        uart_midi_parser.expected_bytes = 1;
+                        break;
+                    case 0x80:  // Note Off
+                    case 0x90:  // Note On
+                    case 0xA0:  // Poly Aftertouch
+                    case 0xB0:  // Control Change
+                    case 0xE0:  // Pitch Bend
+                        uart_midi_parser.expected_bytes = 2;
+                        break;
+                    default:
+                        uart_midi_parser.expected_bytes = 0;
+                }
+                uart_midi_parser.state = 1;  // Expecting data
+            } else {
+                // System message - reset parser
+                uart_midi_parser.state = 0;
+            }
+        } else if (uart_midi_parser.state == 1 && uart_midi_parser.status != 0) {
+            // Data byte with running status
+            if (uart_midi_parser.received_bytes == 0) {
+                uart_midi_parser.data1 = byte;
+                uart_midi_parser.received_bytes = 1;
+
+                if (uart_midi_parser.expected_bytes == 1) {
+                    // Single data byte message complete
+                    process_midi_message(uart_midi_parser.status, uart_midi_parser.data1, 0, timestamp);
+                    uart_midi_parser.received_bytes = 0;  // Ready for next message with running status
+                }
+            } else if (uart_midi_parser.received_bytes == 1 && uart_midi_parser.expected_bytes == 2) {
+                // Second data byte
+                process_midi_message(uart_midi_parser.status, uart_midi_parser.data1, byte, timestamp);
+                uart_midi_parser.received_bytes = 0;  // Ready for next message with running status
+            }
+        }
     }
 }
 
@@ -759,6 +1006,7 @@ void denkioto_multicore_start_core1(void) {
     // Initialize MIDI clock state
     init_midi_clock_state();
     init_usb_midi_tracking();
+    init_uart_midi_state();
 
     // Set up PIO to read touch rings
     uart_pio_offset = pio_add_program(uart_pio, &uart_rx_program);
@@ -1123,4 +1371,94 @@ void denkioto_multicore_resume(void) {
 
     multicore_lockout_end_blocking();
     printf("Core 1 resumed after flash writes.\n");
+}
+
+// MIDI state accessor functions
+uint8_t denkioto_multicore_get_note(uint8_t source, uint8_t channel, uint8_t note) {
+    if (source != MIDI_SOURCE_UART || channel >= 16 || note >= 128) {
+        return 0;  // USB MIDI not implemented yet
+    }
+    return uart_midi_state[channel].notes[note];
+}
+
+void denkioto_multicore_get_notes(uint8_t source, uint8_t channel, uint8_t *notes) {
+    if (source != MIDI_SOURCE_UART || channel >= 16 || !notes) {
+        if (notes) {
+            memset(notes, 0, 128);
+        }
+        return;
+    }
+    memcpy(notes, (void *)uart_midi_state[channel].notes, 128);
+}
+
+uint8_t denkioto_multicore_get_cc(uint8_t source, uint8_t channel, uint8_t cc) {
+    if (source != MIDI_SOURCE_UART || channel >= 16 || cc >= 128) {
+        return 0;  // USB MIDI not implemented yet
+    }
+    return uart_midi_state[channel].cc[cc];
+}
+
+void denkioto_multicore_get_cc_all(uint8_t source, uint8_t channel, uint8_t *values) {
+    if (source != MIDI_SOURCE_UART || channel >= 16 || !values) {
+        if (values) {
+            memset(values, 0, 128);
+        }
+        return;
+    }
+    memcpy(values, (void *)uart_midi_state[channel].cc, 128);
+}
+
+uint8_t denkioto_multicore_get_poly_pressure(uint8_t source, uint8_t channel, uint8_t note) {
+    if (source != MIDI_SOURCE_UART || channel >= 16 || note >= 128) {
+        return 0;  // USB MIDI not implemented yet
+    }
+    return uart_midi_state[channel].poly_pressure[note];
+}
+
+void denkioto_multicore_get_poly_pressure_all(uint8_t source, uint8_t channel, uint8_t *pressure) {
+    if (source != MIDI_SOURCE_UART || channel >= 16 || !pressure) {
+        if (pressure) {
+            memset(pressure, 0, 128);
+        }
+        return;
+    }
+    memcpy(pressure, (void *)uart_midi_state[channel].poly_pressure, 128);
+}
+
+uint16_t denkioto_multicore_get_pitch_bend(uint8_t source, uint8_t channel) {
+    if (source != MIDI_SOURCE_UART || channel >= 16) {
+        return 8192;  // Center value, USB MIDI not implemented yet
+    }
+    return uart_midi_state[channel].pitch_bend;
+}
+
+uint8_t denkioto_multicore_get_channel_pressure(uint8_t source, uint8_t channel) {
+    if (source != MIDI_SOURCE_UART || channel >= 16) {
+        return 0;  // USB MIDI not implemented yet
+    }
+    return uart_midi_state[channel].channel_pressure;
+}
+
+uint8_t denkioto_multicore_get_program(uint8_t source, uint8_t channel) {
+    if (source != MIDI_SOURCE_UART || channel >= 16) {
+        return 0;  // USB MIDI not implemented yet
+    }
+    return uart_midi_state[channel].program;
+}
+
+void denkioto_multicore_get_note_status(uint8_t source, uint8_t channel, uint32_t *status) {
+    if (source != MIDI_SOURCE_UART || channel >= 16 || !status) {
+        if (status) {
+            memset(status, 0, 4 * sizeof(uint32_t));
+        }
+        return;  // USB MIDI not implemented yet
+    }
+    memcpy(status, (void *)uart_midi_state[channel].note_status, 4 * sizeof(uint32_t));
+}
+
+uint64_t denkioto_multicore_get_last_update(uint8_t source, uint8_t channel) {
+    if (source != MIDI_SOURCE_UART || channel >= 16) {
+        return 0;  // USB MIDI not implemented yet
+    }
+    return uart_midi_state[channel].last_update;
 }

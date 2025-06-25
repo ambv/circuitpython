@@ -69,4 +69,17 @@ void denkioto_reset_usb_midi_counters(void);
 void denkioto_multicore_pause(void);
 void denkioto_multicore_resume(void);
 
+// MIDI state accessor functions
+uint8_t denkioto_multicore_get_note(uint8_t source, uint8_t channel, uint8_t note);
+void denkioto_multicore_get_notes(uint8_t source, uint8_t channel, uint8_t *notes);
+uint8_t denkioto_multicore_get_cc(uint8_t source, uint8_t channel, uint8_t cc);
+void denkioto_multicore_get_cc_all(uint8_t source, uint8_t channel, uint8_t *values);
+uint8_t denkioto_multicore_get_poly_pressure(uint8_t source, uint8_t channel, uint8_t note);
+void denkioto_multicore_get_poly_pressure_all(uint8_t source, uint8_t channel, uint8_t *pressure);
+uint16_t denkioto_multicore_get_pitch_bend(uint8_t source, uint8_t channel);
+uint8_t denkioto_multicore_get_channel_pressure(uint8_t source, uint8_t channel);
+uint8_t denkioto_multicore_get_program(uint8_t source, uint8_t channel);
+void denkioto_multicore_get_note_status(uint8_t source, uint8_t channel, uint32_t *status);
+uint64_t denkioto_multicore_get_last_update(uint8_t source, uint8_t channel);
+
 #endif // DENKIOTO_MULTICORE_H

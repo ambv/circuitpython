@@ -717,6 +717,10 @@ msgstr ""
 msgid "CBC blocks must be multiples of 16 bytes"
 msgstr ""
 
+#: ports/raspberrypi/boards/denkioto_rin_rp2040/denkioto/rin.c
+msgid "CC must be 0-127"
+msgstr ""
+
 #: supervisor/shared/safe_mode.c
 msgid "CIRCUITPY drive could not be found or created."
 msgstr ""
@@ -820,6 +824,10 @@ msgstr ""
 
 #: ports/espressif/common-hal/alarm/pin/PinAlarm.c
 msgid "Cannot wake on pin edge. Only level."
+msgstr ""
+
+#: ports/raspberrypi/boards/denkioto_rin_rp2040/denkioto/rin.c
+msgid "Channel must be 0-15"
 msgstr ""
 
 #: shared-bindings/_bleio/CharacteristicBuffer.c
@@ -1618,6 +1626,10 @@ msgstr ""
 msgid "Not supported JPEG standard"
 msgstr ""
 
+#: ports/raspberrypi/boards/denkioto_rin_rp2040/denkioto/rin.c
+msgid "Note must be 0-127"
+msgstr ""
+
 #: ports/espressif/common-hal/paralleldisplaybus/ParallelBus.c
 #: ports/espressif/common-hal/sdioio/SDCard.c
 #, c-format
@@ -2012,6 +2024,10 @@ msgstr ""
 
 #: shared-bindings/aesio/aes.c
 msgid "Source and destination buffers must be the same length"
+msgstr ""
+
+#: ports/raspberrypi/boards/denkioto_rin_rp2040/denkioto/rin.c
+msgid "Source must be MIDI_UART or MIDI_USB"
 msgstr ""
 
 #: shared-bindings/paralleldisplaybus/ParallelBus.c
