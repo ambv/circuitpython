@@ -1,6 +1,6 @@
-From 65cfaa7f0c30f00435fce3f1b9ee2b82f38a5792 Mon Sep 17 00:00:00 2001
+From d2f139fec9c502c8957d925d00fc125fe8528579 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?=C5=81ukasz=20Langa?= <lukasz@langa.pl>
-Date: Wed, 18 Jun 2025 00:30:15 +0200
+Date: Sun, 29 Jun 2025 13:58:26 +0200
 Subject: [PATCH] Filter MIDI clock messages before FIFO for RP2040
 
 This patch adds support for filtering MIDI clock messages (0xF8, 0xFA, 0xFB, 0xFC)
@@ -10,33 +10,47 @@ overflow when Python is not consuming MIDI data fast enough.
 For the Denkioto Rin RP2040 board, clock messages are counted atomically
 and handled by Core 1 for precise timing, while other MIDI messages
 are passed through to the FIFO for Python processing on Core 0.
+
+Key features:
+- Filters high-frequency MIDI clock messages (0xF8) using atomic counters
+- Uses monotonic counters for transport events (start/stop/continue/spp) to
+  avoid timestamp wraparound issues after ~70 minutes
+- SPP (Song Position Pointer) messages are parsed and stored atomically
+- Only active when denkioto_multicore_is_core1_running() returns true
+- All atomic operations use __ATOMIC_SEQ_CST for cross-core consistency
 ---
- src/class/midi/midi_device.c | 44 ++++++++++++++++++++++++++++++++++++
- 1 file changed, 44 insertions(+)
+ src/class/midi/midi_device.c | 64 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 64 insertions(+)
 
 diff --git a/src/class/midi/midi_device.c b/src/class/midi/midi_device.c
-index 0bbb3caf4..d2a498515 100644
+index 0bbb3caf4..cafc44077 100644
 --- a/src/class/midi/midi_device.c
 +++ b/src/class/midi/midi_device.c
-@@ -506,6 +506,17 @@ bool midid_control_xfer_cb(uint8_t rhport, uint8_t stage, const tusb_control_req
+@@ -506,6 +506,23 @@ bool midid_control_xfer_cb(uint8_t rhport, uint8_t stage, const tusb_control_req
    return false; // driver doesn't support any request yet
  }
 
 +// Board-specific clock filtering support
 +#ifdef BOARD_DENKIOTO_RIN_RP2040
-+// Atomic counters for each clock message type
++// Atomic counters for clock messages (high frequency, needs counter)
 +// These are incremented by Core 0 (USB IRQ) and read by Core 1
 +volatile uint32_t usb_midi_clock_count = 0;
++// Transport messages use monotonic counters for ordering
 +volatile uint32_t usb_midi_start_count = 0;
 +volatile uint32_t usb_midi_continue_count = 0;
 +volatile uint32_t usb_midi_stop_count = 0;
++// SPP (Song Position Pointer) atomic fields
++volatile uint32_t usb_midi_spp_count = 0;
++volatile uint16_t usb_midi_spp_position = 0;
++// Monotonic counter max value for easy ordering
++volatile uint32_t usb_midi_transport_max = 0;
 +extern bool denkioto_multicore_is_core1_running(void);
 +#endif
 +
  bool midid_xfer_cb(uint8_t rhport, uint8_t ep_addr, xfer_result_t result, uint32_t xferred_bytes)
  {
    (void) result;
-@@ -525,6 +536,39 @@ bool midid_xfer_cb(uint8_t rhport, uint8_t ep_addr, xfer_result_t result, uint32
+@@ -525,6 +542,53 @@ bool midid_xfer_cb(uint8_t rhport, uint8_t ep_addr, xfer_result_t result, uint32
 
    // receive new data
    if (ep_addr == p_midi->ep_out) {
@@ -55,11 +69,25 @@ index 0bbb3caf4..d2a498515 100644
 +        if (msg_type == 0xF8) {  // Timing Clock
 +          __atomic_add_fetch(&usb_midi_clock_count, 1, __ATOMIC_SEQ_CST);
 +        } else if (msg_type == 0xFA) {  // Start
-+          __atomic_add_fetch(&usb_midi_start_count, 1, __ATOMIC_SEQ_CST);
++          uint32_t new_max = __atomic_add_fetch(&usb_midi_transport_max, 1, __ATOMIC_SEQ_CST);
++          __atomic_store_n(&usb_midi_start_count, new_max, __ATOMIC_SEQ_CST);
 +        } else if (msg_type == 0xFB) {  // Continue
-+          __atomic_add_fetch(&usb_midi_continue_count, 1, __ATOMIC_SEQ_CST);
++          uint32_t new_max = __atomic_add_fetch(&usb_midi_transport_max, 1, __ATOMIC_SEQ_CST);
++          __atomic_store_n(&usb_midi_continue_count, new_max, __ATOMIC_SEQ_CST);
 +        } else if (msg_type == 0xFC) {  // Stop
-+          __atomic_add_fetch(&usb_midi_stop_count, 1, __ATOMIC_SEQ_CST);
++          uint32_t new_max = __atomic_add_fetch(&usb_midi_transport_max, 1, __ATOMIC_SEQ_CST);
++          __atomic_store_n(&usb_midi_stop_count, new_max, __ATOMIC_SEQ_CST);
++        } else if (msg_type == 0xF2) {  // Song Position Pointer
++          // SPP is a 3-byte message: F2 LSB MSB
++          uint8_t lsb = src[i + 2];
++          uint8_t msb = src[i + 3];
++          uint16_t position = (msb << 7) | lsb;
++
++          // Atomically update SPP data with monotonic counter
++          // Update position first to avoid race condition where Core 1 sees new counter with old position
++          __atomic_store_n(&usb_midi_spp_position, position, __ATOMIC_SEQ_CST);
++          uint32_t new_max = __atomic_add_fetch(&usb_midi_transport_max, 1, __ATOMIC_SEQ_CST);
++          __atomic_store_n(&usb_midi_spp_count, new_max, __ATOMIC_SEQ_CST);
 +        } else {
 +          // Not a clock message, copy to filtered buffer
 +          memcpy(filtered_buf + filtered_bytes, src + i, 4);

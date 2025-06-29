@@ -45,6 +45,9 @@ extern volatile uint32_t usb_midi_clock_count;
 extern volatile uint32_t usb_midi_start_count;
 extern volatile uint32_t usb_midi_continue_count;
 extern volatile uint32_t usb_midi_stop_count;
+extern volatile uint32_t usb_midi_spp_count;
+extern volatile uint16_t usb_midi_spp_position;
+extern volatile uint32_t usb_midi_transport_max;
 
 static inline uint32_t denkioto_get_usb_midi_clock_count(void) {
     return __atomic_load_n(&usb_midi_clock_count, __ATOMIC_SEQ_CST);
@@ -60,6 +63,14 @@ static inline uint32_t denkioto_get_usb_midi_continue_count(void) {
 
 static inline uint32_t denkioto_get_usb_midi_stop_count(void) {
     return __atomic_load_n(&usb_midi_stop_count, __ATOMIC_SEQ_CST);
+}
+
+static inline uint32_t denkioto_get_usb_midi_spp_count(void) {
+    return __atomic_load_n(&usb_midi_spp_count, __ATOMIC_SEQ_CST);
+}
+
+static inline uint16_t denkioto_get_usb_midi_spp_position(void) {
+    return __atomic_load_n(&usb_midi_spp_position, __ATOMIC_SEQ_CST);
 }
 
 // Reset TinyUSB atomic MIDI counters (called during board reset)
