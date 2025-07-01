@@ -124,8 +124,8 @@ static dma_channel_config dma_configs[4];
 #define MIDI_SOURCE_USB 2
 
 // Two-stage filter constants for BPM stability
-#define BPM_SHORT_WINDOW 8   // For detecting tempo changes (8 clocks = 1/3 beat)
-#define BPM_LONG_WINDOW 24   // For stable output (24 clocks = 1 beat)
+#define BPM_SHORT_WINDOW 24   // For detecting tempo changes (24 clocks = 1 beat)
+#define BPM_LONG_WINDOW 96   // For stable output (96 clocks = 4 beats)
 
 // MIDI Clock state structure
 typedef struct {
