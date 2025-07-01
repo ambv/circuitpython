@@ -132,8 +132,8 @@ typedef struct {
     volatile uint8_t transport_state;        // 0=stop, 1=play, 2=pause
     volatile uint8_t active_source;          // 0=none, 1=uart, 2=usb
     volatile uint64_t last_clock_timestamp[3];  // Last clock timestamp per source [none, uart, usb]
-    volatile uint32_t clock_count[3];        // Clock count per source [none, uart, usb]
-    volatile uint32_t beat_count[3];         // Beat count per source [none, uart, usb] (6 clocks = 1 beat)
+    volatile int32_t clock_count[3];         // Clock count per source [none, uart, usb]
+    volatile int32_t beat_count[3];          // Beat count per source [none, uart, usb] (6 clocks = 1 beat)
     volatile uint8_t source_priority[2];     // [uart=1, usb=2] priority order
     volatile uint64_t last_source_seen[3];   // Timestamp when each source was last seen
     volatile uint32_t core1_clock_count;     // Clocks processed by Core 1
@@ -156,12 +156,12 @@ static void init_midi_clock_state(void) {
     midi_clock_state.last_clock_timestamp[MIDI_SOURCE_NONE] = 0;
     midi_clock_state.last_clock_timestamp[MIDI_SOURCE_UART] = 0;
     midi_clock_state.last_clock_timestamp[MIDI_SOURCE_USB] = 0;
-    midi_clock_state.clock_count[MIDI_SOURCE_NONE] = 0;
-    midi_clock_state.clock_count[MIDI_SOURCE_UART] = 0;
-    midi_clock_state.clock_count[MIDI_SOURCE_USB] = 0;
-    midi_clock_state.beat_count[MIDI_SOURCE_NONE] = 0;
-    midi_clock_state.beat_count[MIDI_SOURCE_UART] = 0;
-    midi_clock_state.beat_count[MIDI_SOURCE_USB] = 0;
+    midi_clock_state.clock_count[MIDI_SOURCE_NONE] = -1;
+    midi_clock_state.clock_count[MIDI_SOURCE_UART] = -1;
+    midi_clock_state.clock_count[MIDI_SOURCE_USB] = -1;
+    midi_clock_state.beat_count[MIDI_SOURCE_NONE] = -1;
+    midi_clock_state.beat_count[MIDI_SOURCE_UART] = -1;
+    midi_clock_state.beat_count[MIDI_SOURCE_USB] = -1;
     midi_clock_state.source_priority[0] = 1;       // UART first
     midi_clock_state.source_priority[1] = 2;       // USB second
     midi_clock_state.last_source_seen[MIDI_SOURCE_NONE] = 0;
@@ -689,12 +689,12 @@ static inline void process_midi_clock(uint64_t timestamp, uint8_t source) {
 // Process MIDI START from any source
 static inline void process_midi_start(uint64_t timestamp, uint8_t source) {
     midi_clock_state.transport_state = TRANSPORT_PLAYING;
-    midi_clock_state.clock_count[MIDI_SOURCE_NONE] = 0;
-    midi_clock_state.clock_count[MIDI_SOURCE_UART] = 0;
-    midi_clock_state.clock_count[MIDI_SOURCE_USB] = 0;
-    midi_clock_state.beat_count[MIDI_SOURCE_NONE] = 0;
-    midi_clock_state.beat_count[MIDI_SOURCE_UART] = 0;
-    midi_clock_state.beat_count[MIDI_SOURCE_USB] = 0;
+    midi_clock_state.clock_count[MIDI_SOURCE_NONE] = -1;
+    midi_clock_state.clock_count[MIDI_SOURCE_UART] = -1;
+    midi_clock_state.clock_count[MIDI_SOURCE_USB] = -1;
+    midi_clock_state.beat_count[MIDI_SOURCE_NONE] = -1;
+    midi_clock_state.beat_count[MIDI_SOURCE_UART] = -1;
+    midi_clock_state.beat_count[MIDI_SOURCE_USB] = -1;
     midi_clock_state.last_clock_timestamp[MIDI_SOURCE_NONE] = 0;
     midi_clock_state.last_clock_timestamp[MIDI_SOURCE_UART] = 0;  // Reset for new BPM calculation
     midi_clock_state.last_clock_timestamp[MIDI_SOURCE_USB] = 0;   // Reset for new BPM calculation
@@ -710,6 +710,13 @@ static inline void process_midi_start(uint64_t timestamp, uint8_t source) {
 // Process MIDI STOP from any source
 static inline void process_midi_stop(uint64_t timestamp, uint8_t source) {
     midi_clock_state.transport_state = TRANSPORT_STOPPED;
+    // Reset counts to -1 so next clock after START will be beat 0
+    midi_clock_state.clock_count[MIDI_SOURCE_NONE] = -1;
+    midi_clock_state.clock_count[MIDI_SOURCE_UART] = -1;
+    midi_clock_state.clock_count[MIDI_SOURCE_USB] = -1;
+    midi_clock_state.beat_count[MIDI_SOURCE_NONE] = -1;
+    midi_clock_state.beat_count[MIDI_SOURCE_UART] = -1;
+    midi_clock_state.beat_count[MIDI_SOURCE_USB] = -1;
     if (source <= 2) {
         midi_clock_state.last_source_seen[source] = timestamp;
     }
@@ -728,8 +735,9 @@ static inline void process_midi_spp(uint16_t spp_position, uint64_t timestamp, u
     // SPP position is in MIDI beats (1/16 notes)
     // 1 MIDI beat = 6 MIDI clocks
     // So clock_count = spp_position * 6
-    uint32_t clock_position = spp_position * 6;
-    uint32_t beat_position = spp_position;
+    // Decrement by 1 so next clock after CONTINUE snaps position in place
+    int32_t clock_position = (int32_t)(spp_position * 6) - 1;
+    int32_t beat_position = (int32_t)spp_position - 1;
 
     // Update clock and beat counts for the source
     if (source <= 2) {
@@ -1346,14 +1354,14 @@ uint8_t denkioto_multicore_get_clock_source(void) {
     return source;
 }
 
-uint32_t denkioto_multicore_get_clock_count(uint8_t source) {
+int32_t denkioto_multicore_get_clock_count(uint8_t source) {
     if (source > 2) {
         return 0;  // Invalid source
     }
     return __atomic_load_n(&midi_clock_state.clock_count[source], __ATOMIC_SEQ_CST);
 }
 
-uint32_t denkioto_multicore_get_beat_count(uint8_t source) {
+int32_t denkioto_multicore_get_beat_count(uint8_t source) {
     if (source > 2) {
         return 0;  // Invalid source
     }

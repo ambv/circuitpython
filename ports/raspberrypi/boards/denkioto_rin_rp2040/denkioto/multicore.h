@@ -30,8 +30,8 @@ long denkioto_multicore_get_data_ready_count(int ring);
 uint32_t denkioto_multicore_get_midi_bpm_x1000(void);
 uint8_t denkioto_multicore_get_transport_state(void);
 uint8_t denkioto_multicore_get_clock_source(void);
-uint32_t denkioto_multicore_get_clock_count(uint8_t source);
-uint32_t denkioto_multicore_get_beat_count(uint8_t source);
+int32_t denkioto_multicore_get_clock_count(uint8_t source);
+int32_t denkioto_multicore_get_beat_count(uint8_t source);
 void denkioto_multicore_set_clock_source_priority(uint8_t uart_priority, uint8_t usb_priority);
 
 // Error monitoring

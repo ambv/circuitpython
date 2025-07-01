@@ -169,7 +169,7 @@ static mp_obj_t denkioto_rin_get_clock_count_func(mp_obj_t source_obj) {
     if (source < 0 || source > 2) {
         mp_raise_ValueError(MP_ERROR_TEXT("Invalid MIDI source"));
     }
-    return mp_obj_new_int_from_uint(denkioto_multicore_get_clock_count((uint8_t)source));
+    return mp_obj_new_int(denkioto_multicore_get_clock_count((uint8_t)source));
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(denkioto_rin_get_clock_count_obj, denkioto_rin_get_clock_count_func);
 
@@ -186,7 +186,7 @@ static mp_obj_t denkioto_rin_get_beat_count_func(mp_obj_t source_obj) {
     if (source < 0 || source > 2) {
         mp_raise_ValueError(MP_ERROR_TEXT("Invalid MIDI source"));
     }
-    return mp_obj_new_int_from_uint(denkioto_multicore_get_beat_count((uint8_t)source));
+    return mp_obj_new_int(denkioto_multicore_get_beat_count((uint8_t)source));
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(denkioto_rin_get_beat_count_obj, denkioto_rin_get_beat_count_func);
 
