@@ -134,7 +134,7 @@ typedef struct {
     volatile uint64_t last_clock_timestamp[3];  // Last clock timestamp per source [none, uart, usb]
     volatile int32_t clock_count[3];         // Clock count per source [none, uart, usb]
     volatile int32_t beat_count[3];          // Beat count per source [none, uart, usb] (6 clocks = 1 beat)
-    volatile uint8_t source_priority[2];     // [uart=1, usb=2] priority order
+    volatile uint8_t source_priority[3];     // Priority per source [none, uart, usb] - lower number = higher priority
     volatile uint64_t last_source_seen[3];   // Timestamp when each source was last seen
     volatile uint32_t core1_clock_count;     // Clocks processed by Core 1
     volatile uint32_t core0_filtered_count;  // Clocks filtered by Core 0
@@ -162,8 +162,9 @@ static void init_midi_clock_state(void) {
     midi_clock_state.beat_count[MIDI_SOURCE_NONE] = -1;
     midi_clock_state.beat_count[MIDI_SOURCE_UART] = -1;
     midi_clock_state.beat_count[MIDI_SOURCE_USB] = -1;
-    midi_clock_state.source_priority[0] = 1;       // UART first
-    midi_clock_state.source_priority[1] = 2;       // USB second
+    midi_clock_state.source_priority[MIDI_SOURCE_NONE] = 255;  // None has lowest priority
+    midi_clock_state.source_priority[MIDI_SOURCE_UART] = 1;    // UART first
+    midi_clock_state.source_priority[MIDI_SOURCE_USB] = 2;     // USB second
     midi_clock_state.last_source_seen[MIDI_SOURCE_NONE] = 0;
     midi_clock_state.last_source_seen[MIDI_SOURCE_UART] = 0;
     midi_clock_state.last_source_seen[MIDI_SOURCE_USB] = 0;
@@ -662,26 +663,35 @@ static inline void process_midi_clock(uint64_t timestamp, uint8_t source) {
     }
     midi_clock_state.core1_clock_count++;
 
-    // Update active source if needed
+    // Update active source based on configured priorities
     if (midi_clock_state.active_source != source) {
-        // For UART (source 1), always take over
-        if (source == MIDI_SOURCE_UART) {
+        // Get priorities directly using source as index
+        uint8_t incoming_priority = midi_clock_state.source_priority[source];
+        uint8_t current_priority = midi_clock_state.source_priority[midi_clock_state.active_source];
+
+        // Check if we should switch to the incoming source
+        bool should_switch = false;
+
+        if (midi_clock_state.active_source == MIDI_SOURCE_NONE) {
+            // No active source, always switch
+            should_switch = true;
+        } else if (incoming_priority < current_priority) {
+            // Incoming has higher priority (lower number = higher priority)
+            should_switch = true;
+        } else {
+            // Incoming has lower (or same) priority, only switch if current has timed out
+            uint64_t current_last_seen = midi_clock_state.last_source_seen[midi_clock_state.active_source];
+            if (timestamp - current_last_seen > CLOCK_SOURCE_TIMEOUT_US) {
+                should_switch = true;
+            }
+        }
+
+        if (should_switch) {
             midi_clock_state.active_source = source;
             // Reset filter state when switching
             midi_clock_state.intervals_filled = 0;
             midi_clock_state.short_index = 0;
             midi_clock_state.long_index = 0;
-        }
-        // For USB (source 2), only take over if UART has timed out
-        else if (source == MIDI_SOURCE_USB) {
-            uint64_t uart_last_seen = midi_clock_state.last_source_seen[MIDI_SOURCE_UART];
-            if (timestamp - uart_last_seen > CLOCK_SOURCE_TIMEOUT_US) {
-                midi_clock_state.active_source = source;
-                // Reset filter state when switching
-                midi_clock_state.intervals_filled = 0;
-                midi_clock_state.short_index = 0;
-                midi_clock_state.long_index = 0;
-            }
         }
     }
 }
@@ -1373,8 +1383,8 @@ void denkioto_multicore_set_clock_source_priority(uint8_t uart_priority, uint8_t
     if ((uart_priority == 1 || uart_priority == 2) &&
         (usb_priority == 1 || usb_priority == 2) &&
         uart_priority != usb_priority) {
-        midi_clock_state.source_priority[0] = uart_priority;
-        midi_clock_state.source_priority[1] = usb_priority;
+        midi_clock_state.source_priority[MIDI_SOURCE_UART] = uart_priority;
+        midi_clock_state.source_priority[MIDI_SOURCE_USB] = usb_priority;
     }
 }
 
