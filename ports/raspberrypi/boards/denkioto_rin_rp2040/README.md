@@ -113,6 +113,39 @@ Get the number of times a ring has been resynchronized. Should be 0 with IRQ-bas
 Get the number of times data was marked ready for a ring. Should increase steadily.
 - `ring`: Ring number (0-3)
 
+### MIDI Clock Functions
+
+#### `denkioto_rin.get_midi_bpm() -> int`
+Get the current MIDI tempo in BPM × 1000 for precision.
+- Returns BPM multiplied by 1000 (e.g., 120000 = 120.0 BPM)
+- Calculated from incoming MIDI clock messages using a two-stage filter
+
+#### `denkioto_rin.get_transport_state() -> int`
+Get the current MIDI transport state.
+- Returns: 0 = stopped, 1 = playing, 2 = paused
+
+#### `denkioto_rin.get_clock_source() -> int`
+Get the active MIDI clock source.
+- Returns: 0 = none, 1 = UART, 2 = USB
+- Source selection based on priority and timeout settings
+
+#### `denkioto_rin.get_clock_count() -> int`
+Get the unified MIDI clock count since last transport start.
+- Returns -1 when transport is stopped
+- Increments from 0 after START or CONTINUE
+- Only counts clocks from the active source
+
+#### `denkioto_rin.get_beat_count() -> int`
+Get the unified MIDI beat count since last transport start.
+- Returns -1 when transport is stopped
+- Increments every 6 clocks (MIDI uses 24 clocks per quarter note)
+- Only counts beats from the active source
+
+#### `denkioto_rin.set_clock_source_priority(sources: list[int]) -> None`
+Set the priority order for MIDI clock sources.
+- `sources`: List of source IDs in priority order (e.g., [1, 2] for UART first, USB second)
+- Lower index = higher priority
+
 ## Example Usage
 
 ```python
@@ -423,9 +456,19 @@ typedef struct {
     volatile uint8_t  transport_state;       // 0=stop, 1=play, 2=pause
     volatile uint8_t  active_source;         // 0=none, 1=uart, 2=usb
     volatile uint64_t last_clock_timestamp;  // Hardware timer reference
-    volatile uint32_t clock_count;           // Since transport start
+    volatile int32_t  clock_count;           // Unified count from active source (-1 when stopped)
+    volatile int32_t  beat_count;            // Unified beat count (6 clocks = 1 beat)
 } unified_midi_clock_t;
 ```
+
+The clock and beat counts are unified across all sources - only the active source increments these counters. This ensures consistent timing regardless of which source is selected.
+
+**Clock Source Priority and Selection:**
+- Each source (UART, USB) has a configurable priority (lower number = higher priority)
+- The highest priority source with recent clock messages becomes the active source
+- Only the active source's clock messages increment the unified counters
+- If the active source times out (>500ms without clocks), the system switches to the next available source
+- This prevents clock/beat count jumps when switching between sources
 
 #### Core 0 (Python) Responsibilities
 
@@ -465,19 +508,6 @@ We apply a patch to TinyUSB during build:
 - **UART MIDI**: Interrupt-driven, naturally thread-safe
 - **USB MIDI**: Atomic counter reads, no complex synchronization needed
 - **Shared state**: Minimal shared variables, all marked volatile
-
-### Performance Characteristics
-
-**Achieved Timing Precision:**
-- **UART MIDI**: <10µs jitter (professional grade)
-- **USB MIDI**: <100µs jitter (via continuous polling)
-- **Tempo tracking**: ±0.01 BPM accuracy
-- **Transport response**: <1ms latency
-
-**Resource Usage:**
-- **Core 1**: +2% CPU for USB polling + UART interrupts
-- **Memory**: ~200 bytes for clock state
-- **No additional PIO resources** (uses hardware UART)
 
 ### Technical Rationale and Results
 
