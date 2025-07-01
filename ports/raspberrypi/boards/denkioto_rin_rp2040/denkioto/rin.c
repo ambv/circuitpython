@@ -156,39 +156,29 @@ static MP_DEFINE_CONST_FUN_OBJ_0(denkioto_rin_get_clock_source_obj, denkioto_rin
 
 
 
-static mp_obj_t denkioto_rin_get_clock_count_func(mp_obj_t source_obj) {
-    // | def get_clock_count(source: int) -> int:
-    // |     """Get the MIDI clock count for a specific source.
+static mp_obj_t denkioto_rin_get_clock_count_func(void) {
+    // | def get_clock_count() -> int:
+    // |     """Get the unified MIDI clock count.
     // |
-    // |     :param source: MIDI source (MIDI_UART or MIDI_USB)
-    // |     :return: Clock count since last transport start
+    // |     :return: Unified clock count since last transport start
     // |     """
     // |     ...
     // |
-    mp_int_t source = mp_obj_get_int(source_obj);
-    if (source < 0 || source > 2) {
-        mp_raise_ValueError(MP_ERROR_TEXT("Invalid MIDI source"));
-    }
-    return mp_obj_new_int(denkioto_multicore_get_clock_count((uint8_t)source));
+    return mp_obj_new_int(denkioto_multicore_get_clock_count());
 }
-static MP_DEFINE_CONST_FUN_OBJ_1(denkioto_rin_get_clock_count_obj, denkioto_rin_get_clock_count_func);
+static MP_DEFINE_CONST_FUN_OBJ_0(denkioto_rin_get_clock_count_obj, denkioto_rin_get_clock_count_func);
 
-static mp_obj_t denkioto_rin_get_beat_count_func(mp_obj_t source_obj) {
-    // | def get_beat_count(source: int) -> int:
-    // |     """Get the MIDI beat count for a specific source.
+static mp_obj_t denkioto_rin_get_beat_count_func(void) {
+    // | def get_beat_count() -> int:
+    // |     """Get the unified MIDI beat count.
     // |
-    // |     :param source: MIDI source (MIDI_UART or MIDI_USB)
-    // |     :return: Beat count since last transport start (6 clocks = 1 beat)
+    // |     :return: Unified beat count since last transport start (6 clocks = 1 beat)
     // |     """
     // |     ...
     // |
-    mp_int_t source = mp_obj_get_int(source_obj);
-    if (source < 0 || source > 2) {
-        mp_raise_ValueError(MP_ERROR_TEXT("Invalid MIDI source"));
-    }
-    return mp_obj_new_int(denkioto_multicore_get_beat_count((uint8_t)source));
+    return mp_obj_new_int(denkioto_multicore_get_beat_count());
 }
-static MP_DEFINE_CONST_FUN_OBJ_1(denkioto_rin_get_beat_count_obj, denkioto_rin_get_beat_count_func);
+static MP_DEFINE_CONST_FUN_OBJ_0(denkioto_rin_get_beat_count_obj, denkioto_rin_get_beat_count_func);
 
 static mp_obj_t denkioto_rin_set_clock_source_priority_func(mp_obj_t sources_obj) {
     // | def set_clock_source_priority(sources: list[int]) -> None:
