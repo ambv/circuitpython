@@ -1,0 +1,221 @@
+From 62e8561da22fd9eb7c8235272830a9527d199481 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C5=81ukasz=20Langa?= <lukasz@langa.pl>
+Date: Wed, 2 Jul 2025 12:12:27 +0200
+Subject: [PATCH] Board-specific USB MIDI processing for Denkioto Rin RP2040
+
+When Core 1 is active on the Denkioto Rin RP2040 board, this patch
+completely takes over USB MIDI message processing at the reception level.
+Instead of passing messages to the FIFO for Python consumption, all MIDI
+data is processed directly in the USB interrupt context.
+
+Features:
+- Clock messages (0xF8, 0xFA, 0xFB, 0xFC) are counted atomically for
+  Core 1 to calculate precise BPM and transport state
+- Song Position Pointer (0xF2) messages are parsed and stored atomically
+- Channel messages (Note On/Off, CC, Program Change, Pitch Bend, etc.)
+  update a full 16-channel MIDI state table with microsecond timestamps
+- Atomic accessor functions allow Core 1 and Python APIs to read the
+  current MIDI state without race conditions
+
+Implementation:
+- Only active when denkioto_multicore_is_core1_running() returns true
+- When Core 1 is not running, standard TinyUSB behavior is preserved
+- All atomic operations use __ATOMIC_SEQ_CST for cross-core consistency
+- Shares data structures with UART MIDI implementation via midi_state.h
+
+This approach prevents FIFO overflow from high-frequency clock messages
+and provides professional-grade MIDI timing accuracy by processing all
+messages in interrupt context rather than in Python.
+---
+ src/class/midi/midi_device.c | 169 +++++++++++++++++++++++++++++++++++
+ 1 file changed, 169 insertions(+)
+
+diff --git a/src/class/midi/midi_device.c b/src/class/midi/midi_device.c
+index 0bbb3caf4..73634b220 100644
+--- a/src/class/midi/midi_device.c
++++ b/src/class/midi/midi_device.c
+@@ -506,6 +506,127 @@ bool midid_control_xfer_cb(uint8_t rhport, uint8_t stage, const tusb_control_req
+   return false; // driver doesn't support any request yet
+ }
+
++#ifdef BOARD_DENKIOTO_RIN_RP2040
++// Atomic counters for clock messages (high frequency, needs counter)
++// These are incremented by Core 0 (USB IRQ) and read by Core 1
++volatile uint32_t usb_midi_clock_count = 0;
++// Transport messages use monotonic counters for ordering
++volatile uint32_t usb_midi_start_count = 0;
++volatile uint32_t usb_midi_continue_count = 0;
++volatile uint32_t usb_midi_stop_count = 0;
++// SPP (Song Position Pointer) atomic fields
++volatile uint32_t usb_midi_spp_count = 0;
++volatile uint16_t usb_midi_spp_position = 0;
++// Monotonic counter max value for easy ordering
++volatile uint32_t usb_midi_transport_max = 0;
++extern bool denkioto_multicore_is_core1_running(void);
++
++// Include shared MIDI state structures
++#include "denkioto/midi_state.h"
++#include "hardware/timer.h"  // For time_us_64()
++
++// USB MIDI state - 16 channels
++static midi_channel_t usb_midi_state[16];
++
++// Initialize USB MIDI state (called during board reset)
++void denkioto_init_usb_midi_state(void) {
++    for (int ch = 0; ch < 16; ch++) {
++        // Clear all note velocities
++        memset((void *)usb_midi_state[ch].notes, 0, 128);
++
++        // Initialize CC values to 0
++        memset((void *)usb_midi_state[ch].cc, 0, 128);
++
++        // Clear polyphonic aftertouch
++        memset((void *)usb_midi_state[ch].poly_pressure, 0, 128);
++
++        // Center pitch bend
++        usb_midi_state[ch].pitch_bend = 8192;
++
++        // Clear aftertouch
++        usb_midi_state[ch].channel_pressure = 0;
++
++        // Program 0
++        usb_midi_state[ch].program = 0;
++
++        // Clear note status
++        memset((void *)usb_midi_state[ch].note_status, 0, sizeof(usb_midi_state[ch].note_status));
++
++        // Clear timestamp
++        usb_midi_state[ch].last_update = 0;
++    }
++}
++
++
++// USB MIDI state accessors (called from multicore.c)
++uint8_t denkioto_usb_midi_get_note(uint8_t channel, uint8_t note) {
++    if (channel >= 16 || note >= 128) return 0;
++    return usb_midi_state[channel].notes[note];
++}
++
++void denkioto_usb_midi_get_notes(uint8_t channel, uint8_t *notes) {
++    if (channel >= 16 || !notes) {
++        if (notes) memset(notes, 0, 128);
++        return;
++    }
++    memcpy(notes, (void *)usb_midi_state[channel].notes, 128);
++}
++
++uint8_t denkioto_usb_midi_get_cc(uint8_t channel, uint8_t cc) {
++    if (channel >= 16 || cc >= 128) return 0;
++    return usb_midi_state[channel].cc[cc];
++}
++
++void denkioto_usb_midi_get_cc_all(uint8_t channel, uint8_t *values) {
++    if (channel >= 16 || !values) {
++        if (values) memset(values, 0, 128);
++        return;
++    }
++    memcpy(values, (void *)usb_midi_state[channel].cc, 128);
++}
++
++uint8_t denkioto_usb_midi_get_poly_pressure(uint8_t channel, uint8_t note) {
++    if (channel >= 16 || note >= 128) return 0;
++    return usb_midi_state[channel].poly_pressure[note];
++}
++
++void denkioto_usb_midi_get_poly_pressure_all(uint8_t channel, uint8_t *pressure) {
++    if (channel >= 16 || !pressure) {
++        if (pressure) memset(pressure, 0, 128);
++        return;
++    }
++    memcpy(pressure, (void *)usb_midi_state[channel].poly_pressure, 128);
++}
++
++uint16_t denkioto_usb_midi_get_pitch_bend(uint8_t channel) {
++    if (channel >= 16) return 8192;
++    return usb_midi_state[channel].pitch_bend;
++}
++
++uint8_t denkioto_usb_midi_get_channel_pressure(uint8_t channel) {
++    if (channel >= 16) return 0;
++    return usb_midi_state[channel].channel_pressure;
++}
++
++uint8_t denkioto_usb_midi_get_program(uint8_t channel) {
++    if (channel >= 16) return 0;
++    return usb_midi_state[channel].program;
++}
++
++void denkioto_usb_midi_get_note_status(uint8_t channel, uint32_t *status) {
++    if (channel >= 16 || !status) {
++        if (status) memset(status, 0, 4 * sizeof(uint32_t));
++        return;
++    }
++    memcpy(status, (void *)usb_midi_state[channel].note_status, 4 * sizeof(uint32_t));
++}
++
++uint64_t denkioto_usb_midi_get_last_update(uint8_t channel) {
++    if (channel >= 16) return 0;
++    return usb_midi_state[channel].last_update;
++}
++#endif
++
+ bool midid_xfer_cb(uint8_t rhport, uint8_t ep_addr, xfer_result_t result, uint32_t xferred_bytes)
+ {
+   (void) result;
+@@ -525,6 +646,54 @@ bool midid_xfer_cb(uint8_t rhport, uint8_t ep_addr, xfer_result_t result, uint32
+
+   // receive new data
+   if (ep_addr == p_midi->ep_out) {
++#ifdef BOARD_DENKIOTO_RIN_RP2040
++    if (denkioto_multicore_is_core1_running()) {
++      uint8_t* src = _midid_epbuf[idx].epout;
++      uint64_t timestamp = time_us_64();
++
++      // Process in 4-byte MIDI packets
++      for (uint32_t i = 0; i + 3 < xferred_bytes; i += 4) {
++        uint8_t msg_type = src[i + 1];  // MIDI message is at byte 1 of packet
++
++        // Check if this is a clock message
++        if (msg_type == 0xF8) {  // Timing Clock
++          __atomic_add_fetch(&usb_midi_clock_count, 1, __ATOMIC_SEQ_CST);
++        } else if (msg_type == 0xFA) {  // Start
++          uint32_t new_max = __atomic_add_fetch(&usb_midi_transport_max, 1, __ATOMIC_SEQ_CST);
++          __atomic_store_n(&usb_midi_start_count, new_max, __ATOMIC_SEQ_CST);
++        } else if (msg_type == 0xFB) {  // Continue
++          uint32_t new_max = __atomic_add_fetch(&usb_midi_transport_max, 1, __ATOMIC_SEQ_CST);
++          __atomic_store_n(&usb_midi_continue_count, new_max, __ATOMIC_SEQ_CST);
++        } else if (msg_type == 0xFC) {  // Stop
++          uint32_t new_max = __atomic_add_fetch(&usb_midi_transport_max, 1, __ATOMIC_SEQ_CST);
++          __atomic_store_n(&usb_midi_stop_count, new_max, __ATOMIC_SEQ_CST);
++        } else if (msg_type == 0xF2) {  // Song Position Pointer
++          // SPP is a 3-byte message: F2 LSB MSB
++          uint8_t lsb = src[i + 2];
++          uint8_t msb = src[i + 3];
++          uint16_t position = (msb << 7) | lsb;
++
++          // Atomically update SPP data with monotonic counter
++          // Update position first to avoid race condition where Core 1 sees new counter with old position
++          __atomic_store_n(&usb_midi_spp_position, position, __ATOMIC_SEQ_CST);
++          uint32_t new_max = __atomic_add_fetch(&usb_midi_transport_max, 1, __ATOMIC_SEQ_CST);
++          __atomic_store_n(&usb_midi_spp_count, new_max, __ATOMIC_SEQ_CST);
++        } else {
++          // Process channel messages for state tracking
++          // uint8_t cable = (src[i] >> 4) & 0x0F;
++          // uint8_t code_index = src[i] & 0x0F;
++          uint8_t status = src[i + 1];
++          uint8_t data1 = src[i + 2];
++          uint8_t data2 = src[i + 3];
++
++          // Check if it's a channel message (status 0x80-0xEF)
++          if ((status & 0xF0) >= 0x80 && (status & 0xF0) <= 0xE0) {
++            process_midi_message(usb_midi_state, status, data1, data2, timestamp);
++          }
++        }
++      }
++    } else
++#endif
+     tu_fifo_write_n(&p_midi->rx_ff, _midid_epbuf[idx].epout, (uint16_t)xferred_bytes);
+
+     // invoke receive callback if available
+--
+2.49.0

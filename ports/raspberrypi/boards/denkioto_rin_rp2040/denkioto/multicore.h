@@ -76,6 +76,22 @@ static inline uint16_t denkioto_get_usb_midi_spp_position(void) {
 // Reset TinyUSB atomic MIDI counters (called during board reset)
 void denkioto_reset_usb_midi_counters(void);
 
+// USB MIDI state accessor functions (implemented in TinyUSB)
+uint8_t denkioto_usb_midi_get_note(uint8_t channel, uint8_t note);
+void denkioto_usb_midi_get_notes(uint8_t channel, uint8_t *notes);
+uint8_t denkioto_usb_midi_get_cc(uint8_t channel, uint8_t cc);
+void denkioto_usb_midi_get_cc_all(uint8_t channel, uint8_t *values);
+uint8_t denkioto_usb_midi_get_poly_pressure(uint8_t channel, uint8_t note);
+void denkioto_usb_midi_get_poly_pressure_all(uint8_t channel, uint8_t *pressure);
+uint16_t denkioto_usb_midi_get_pitch_bend(uint8_t channel);
+uint8_t denkioto_usb_midi_get_channel_pressure(uint8_t channel);
+uint8_t denkioto_usb_midi_get_program(uint8_t channel);
+void denkioto_usb_midi_get_note_status(uint8_t channel, uint32_t *status);
+uint64_t denkioto_usb_midi_get_last_update(uint8_t channel);
+
+// Initialize USB MIDI state (called during board reset)
+void denkioto_init_usb_midi_state(void);
+
 // Flash write protection - lockout Core 1 during flash operations
 void denkioto_multicore_pause(void);
 void denkioto_multicore_resume(void);

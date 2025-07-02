@@ -27,6 +27,7 @@
 #include "hardware/uart.h"
 #include "hardware/timer.h"
 #include "tusb.h"
+#include "denkioto/midi_state.h"
 
 // TinyUSB internal structures for direct FIFO access
 #include "tusb_config.h"
@@ -203,33 +204,6 @@ static struct {
     uint32_t last_spp_count;
 } usb_midi_tracking = {0};
 
-// MIDI channel state structure
-typedef struct {
-    // Note velocities (0 = off, 1-127 = on with velocity)
-    volatile uint8_t notes[128];
-
-    // Control change values
-    volatile uint8_t cc[128];
-
-    // Polyphonic aftertouch (per-note pressure)
-    volatile uint8_t poly_pressure[128];
-
-    // Pitch bend (14-bit value: 0-16383, center = 8192)
-    volatile uint16_t pitch_bend;
-
-    // Channel pressure (aftertouch)
-    volatile uint8_t channel_pressure;
-
-    // Program change
-    volatile uint8_t program;
-
-    // Note status tracking for efficient Python polling
-    // Each bit represents one note: note_status[0] bits 0-31 = notes 0-31, etc.
-    volatile uint32_t note_status[4];  // 128 bits total, one per note
-
-    // Timestamp of last update
-    volatile uint64_t last_update;
-} midi_channel_t;
 
 // UART MIDI parser state
 typedef struct {
@@ -306,116 +280,7 @@ static inline void process_midi_spp(uint16_t spp_position, uint64_t timestamp, u
 static inline void setup_uart_midi(void);
 static inline void core1_usb_midi_poll(void);
 
-// Helper functions for MIDI state updates
-static inline void update_note_status(uint8_t channel, uint8_t note) {
-    // Update the bit in note_status for this note
-    uint8_t array_index = note / 32;  // Which uint32_t (0-3)
-    uint8_t bit_index = note % 32;     // Which bit within that uint32_t
 
-    if (uart_midi_state[channel].notes[note] > 0) {
-        // Note is on - set the bit
-        uart_midi_state[channel].note_status[array_index] |= (1U << bit_index);
-    } else {
-        // Note is off - clear the bit
-        uart_midi_state[channel].note_status[array_index] &= ~(1U << bit_index);
-    }
-}
-
-// Helper function to clear all notes for a channel
-static void clear_all_notes(uint8_t channel) {
-    for (int note = 0; note < 128; note++) {
-        uart_midi_state[channel].notes[note] = 0;
-        update_note_status(channel, note);
-    }
-}
-
-// Helper function to reset controllers according to MIDI RP-015
-static void reset_all_controllers(uint8_t channel) {
-    // Set Expression (#11) to 127
-    uart_midi_state[channel].cc[11] = 127;
-
-    // Set Modulation (#1) to 0
-    uart_midi_state[channel].cc[1] = 0;
-
-    // Set Pedals (#64, #65, #66, #67) to 0
-    uart_midi_state[channel].cc[64] = 0;  // Sustain
-    uart_midi_state[channel].cc[65] = 0;  // Portamento
-    uart_midi_state[channel].cc[66] = 0;  // Sostenuto
-    uart_midi_state[channel].cc[67] = 0;  // Soft Pedal
-
-    // Set Registered and Non-registered parameter number LSB and MSB (#98-#101) to null (127)
-    uart_midi_state[channel].cc[98] = 127;   // NRPN LSB
-    uart_midi_state[channel].cc[99] = 127;   // NRPN MSB
-    uart_midi_state[channel].cc[100] = 127;  // RPN LSB
-    uart_midi_state[channel].cc[101] = 127;  // RPN MSB
-
-    // Set pitch bender to center (8192)
-    uart_midi_state[channel].pitch_bend = 8192;
-
-    // Reset channel pressure to 0
-    uart_midi_state[channel].channel_pressure = 0;
-
-    // Reset polyphonic pressure for all notes to 0
-    memset((void *)uart_midi_state[channel].poly_pressure, 0, 128);
-}
-
-// Process complete MIDI messages
-static void process_midi_message(uint8_t status, uint8_t data1, uint8_t data2, uint64_t timestamp) {
-    uint8_t msg_type = status & 0xF0;
-    uint8_t channel = status & 0x0F;
-
-    switch (msg_type) {
-        case 0x80:  // Note Off
-            uart_midi_state[channel].notes[data1] = 0;
-            update_note_status(channel, data1);
-            break;
-
-        case 0x90:  // Note On
-            uart_midi_state[channel].notes[data1] = (data2 == 0) ? 0 : data2;
-            update_note_status(channel, data1);
-            break;
-
-        case 0xA0:  // Polyphonic Aftertouch
-            uart_midi_state[channel].poly_pressure[data1] = data2;
-            break;
-
-        case 0xB0:  // Control Change
-            // Handle channel mode messages
-            if (data1 >= 120 && data1 <= 127) {
-                switch (data1) {
-                    case 120:  // All Sound Off
-                        clear_all_notes(channel);
-                        break;
-                    case 121:  // Reset All Controllers
-                        reset_all_controllers(channel);
-                        break;
-                    case 123:  // All Notes Off
-                        clear_all_notes(channel);
-                        break;
-                        // Other channel mode messages (122, 124-127) are ignored
-                        // as they don't affect stored state
-                }
-            } else {
-                // Regular control change
-                uart_midi_state[channel].cc[data1] = data2;
-            }
-            break;
-
-        case 0xC0:  // Program Change
-            uart_midi_state[channel].program = data1;
-            break;
-
-        case 0xD0:  // Channel Pressure
-            uart_midi_state[channel].channel_pressure = data1;
-            break;
-
-        case 0xE0:  // Pitch Bend
-            uart_midi_state[channel].pitch_bend = data1 | (data2 << 7);
-            break;
-    }
-
-    uart_midi_state[channel].last_update = timestamp;
-}
 
 // Touch ring DMA interrupt handler (uses DMA_IRQ_1)
 static void __isr __not_in_flash_func(touch_ring_dma_irq_handler)(void) {
@@ -556,12 +421,12 @@ static void __isr __not_in_flash_func(midi_uart_irq_handler)(void) {
 
                 if (uart_midi_parser.expected_bytes == 1) {
                     // Single data byte message complete
-                    process_midi_message(uart_midi_parser.status, uart_midi_parser.data1, 0, timestamp);
+                    process_midi_message(uart_midi_state, uart_midi_parser.status, uart_midi_parser.data1, 0, timestamp);
                     uart_midi_parser.received_bytes = 0;  // Ready for next message with running status
                 }
             } else if (uart_midi_parser.received_bytes == 1 && uart_midi_parser.expected_bytes == 2) {
                 // Second data byte
-                process_midi_message(uart_midi_parser.status, uart_midi_parser.data1, byte, timestamp);
+                process_midi_message(uart_midi_state, uart_midi_parser.status, uart_midi_parser.data1, byte, timestamp);
                 uart_midi_parser.received_bytes = 0;  // Ready for next message with running status
             }
         }
@@ -1185,6 +1050,9 @@ void denkioto_reset_usb_midi_counters(void) {
     __atomic_store_n(&usb_midi_spp_count, 0, __ATOMIC_SEQ_CST);
     __atomic_store_n(&usb_midi_spp_position, 0, __ATOMIC_SEQ_CST);
     __atomic_store_n(&usb_midi_transport_max, 0, __ATOMIC_SEQ_CST);
+
+    // Also reset USB MIDI channel state
+    denkioto_init_usb_midi_state();
 }
 
 void denkioto_multicore_print_debug_stats(void) {
@@ -1430,90 +1298,159 @@ void denkioto_multicore_resume(void) {
 
 // MIDI state accessor functions
 uint8_t denkioto_multicore_get_note(uint8_t source, uint8_t channel, uint8_t note) {
-    if (source != MIDI_SOURCE_UART || channel >= 16 || note >= 128) {
-        return 0;  // USB MIDI not implemented yet
+    if (channel >= 16 || note >= 128) {
+        return 0;
     }
-    return uart_midi_state[channel].notes[note];
+
+    if (source == MIDI_SOURCE_UART) {
+        return uart_midi_state[channel].notes[note];
+    } else if (source == MIDI_SOURCE_USB) {
+        return denkioto_usb_midi_get_note(channel, note);
+    }
+
+    return 0;
 }
 
 void denkioto_multicore_get_notes(uint8_t source, uint8_t channel, uint8_t *notes) {
-    if (source != MIDI_SOURCE_UART || channel >= 16 || !notes) {
-        if (notes) {
-            memset(notes, 0, 128);
-        }
+    if (channel >= 16 || !notes) {
+        memset(notes, 0, 128);
         return;
     }
-    memcpy(notes, (void *)uart_midi_state[channel].notes, 128);
+
+    if (source == MIDI_SOURCE_UART) {
+        memcpy(notes, (void *)uart_midi_state[channel].notes, 128);
+    } else if (source == MIDI_SOURCE_USB) {
+        denkioto_usb_midi_get_notes(channel, notes);
+    } else {
+        memset(notes, 0, 128);
+    }
 }
 
 uint8_t denkioto_multicore_get_cc(uint8_t source, uint8_t channel, uint8_t cc) {
-    if (source != MIDI_SOURCE_UART || channel >= 16 || cc >= 128) {
-        return 0;  // USB MIDI not implemented yet
+    if (channel >= 16 || cc >= 128) {
+        return 0;
     }
-    return uart_midi_state[channel].cc[cc];
+
+    if (source == MIDI_SOURCE_UART) {
+        return uart_midi_state[channel].cc[cc];
+    } else if (source == MIDI_SOURCE_USB) {
+        return denkioto_usb_midi_get_cc(channel, cc);
+    }
+
+    return 0;
 }
 
 void denkioto_multicore_get_cc_all(uint8_t source, uint8_t channel, uint8_t *values) {
-    if (source != MIDI_SOURCE_UART || channel >= 16 || !values) {
-        if (values) {
-            memset(values, 0, 128);
-        }
+    if (channel >= 16 || !values) {
+        memset(values, 0, 128);
         return;
     }
-    memcpy(values, (void *)uart_midi_state[channel].cc, 128);
+
+    if (source == MIDI_SOURCE_UART) {
+        memcpy(values, (void *)uart_midi_state[channel].cc, 128);
+    } else if (source == MIDI_SOURCE_USB) {
+        denkioto_usb_midi_get_cc_all(channel, values);
+    } else {
+        memset(values, 0, 128);
+    }
 }
 
 uint8_t denkioto_multicore_get_poly_pressure(uint8_t source, uint8_t channel, uint8_t note) {
-    if (source != MIDI_SOURCE_UART || channel >= 16 || note >= 128) {
-        return 0;  // USB MIDI not implemented yet
+    if (channel >= 16 || note >= 128) {
+        return 0;
     }
-    return uart_midi_state[channel].poly_pressure[note];
+
+    if (source == MIDI_SOURCE_UART) {
+        return uart_midi_state[channel].poly_pressure[note];
+    } else if (source == MIDI_SOURCE_USB) {
+        return denkioto_usb_midi_get_poly_pressure(channel, note);
+    }
+
+    return 0;
 }
 
 void denkioto_multicore_get_poly_pressure_all(uint8_t source, uint8_t channel, uint8_t *pressure) {
-    if (source != MIDI_SOURCE_UART || channel >= 16 || !pressure) {
-        if (pressure) {
-            memset(pressure, 0, 128);
-        }
+    if (channel >= 16 || !pressure) {
+        memset(pressure, 0, 128);
         return;
     }
-    memcpy(pressure, (void *)uart_midi_state[channel].poly_pressure, 128);
+
+    if (source == MIDI_SOURCE_UART) {
+        memcpy(pressure, (void *)uart_midi_state[channel].poly_pressure, 128);
+    } else if (source == MIDI_SOURCE_USB) {
+        denkioto_usb_midi_get_poly_pressure_all(channel, pressure);
+    } else {
+        memset(pressure, 0, 128);
+    }
 }
 
 uint16_t denkioto_multicore_get_pitch_bend(uint8_t source, uint8_t channel) {
-    if (source != MIDI_SOURCE_UART || channel >= 16) {
-        return 8192;  // Center value, USB MIDI not implemented yet
+    if (channel >= 16) {
+        return 8192;  // Center value
     }
-    return uart_midi_state[channel].pitch_bend;
+
+    if (source == MIDI_SOURCE_UART) {
+        return uart_midi_state[channel].pitch_bend;
+    } else if (source == MIDI_SOURCE_USB) {
+        return denkioto_usb_midi_get_pitch_bend(channel);
+    }
+
+    return 8192;  // Center value
 }
 
 uint8_t denkioto_multicore_get_channel_pressure(uint8_t source, uint8_t channel) {
-    if (source != MIDI_SOURCE_UART || channel >= 16) {
-        return 0;  // USB MIDI not implemented yet
+    if (channel >= 16) {
+        return 0;
     }
-    return uart_midi_state[channel].channel_pressure;
+
+    if (source == MIDI_SOURCE_UART) {
+        return uart_midi_state[channel].channel_pressure;
+    } else if (source == MIDI_SOURCE_USB) {
+        return denkioto_usb_midi_get_channel_pressure(channel);
+    }
+
+    return 0;
 }
 
 uint8_t denkioto_multicore_get_program(uint8_t source, uint8_t channel) {
-    if (source != MIDI_SOURCE_UART || channel >= 16) {
-        return 0;  // USB MIDI not implemented yet
+    if (channel >= 16) {
+        return 0;
     }
-    return uart_midi_state[channel].program;
+
+    if (source == MIDI_SOURCE_UART) {
+        return uart_midi_state[channel].program;
+    } else if (source == MIDI_SOURCE_USB) {
+        return denkioto_usb_midi_get_program(channel);
+    }
+
+    return 0;
 }
 
 void denkioto_multicore_get_note_status(uint8_t source, uint8_t channel, uint32_t *status) {
-    if (source != MIDI_SOURCE_UART || channel >= 16 || !status) {
-        if (status) {
-            memset(status, 0, 4 * sizeof(uint32_t));
-        }
-        return;  // USB MIDI not implemented yet
+    if (channel >= 16 || !status) {
+        memset(status, 0, 4 * sizeof(uint32_t));
+        return;
     }
-    memcpy(status, (void *)uart_midi_state[channel].note_status, 4 * sizeof(uint32_t));
+
+    if (source == MIDI_SOURCE_UART) {
+        memcpy(status, (void *)uart_midi_state[channel].note_status, 4 * sizeof(uint32_t));
+    } else if (source == MIDI_SOURCE_USB) {
+        denkioto_usb_midi_get_note_status(channel, status);
+    } else {
+        memset(status, 0, 4 * sizeof(uint32_t));
+    }
 }
 
 uint64_t denkioto_multicore_get_last_update(uint8_t source, uint8_t channel) {
-    if (source != MIDI_SOURCE_UART || channel >= 16) {
-        return 0;  // USB MIDI not implemented yet
+    if (channel >= 16) {
+        return 0;
     }
-    return uart_midi_state[channel].last_update;
+
+    if (source == MIDI_SOURCE_UART) {
+        return uart_midi_state[channel].last_update;
+    } else if (source == MIDI_SOURCE_USB) {
+        return denkioto_usb_midi_get_last_update(channel);
+    }
+
+    return 0;
 }

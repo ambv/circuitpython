@@ -406,48 +406,27 @@ Core 1 handles precise MIDI clock timing while Core 0 processes regular MIDI mes
 
 #### Core 1 Responsibilities
 
-**1. UART MIDI Clock Reception:**
-```c
-// UART RX interrupt handler on Core 1
-static void __isr __not_in_flash_func(midi_uart_irq_handler)(void) {
-    while (uart_is_readable(uart0)) {
-        uint64_t timestamp = time_us_64();  // Microsecond precision
-        uint8_t byte = uart_getc(uart0);
+**1. UART MIDI Complete Message Processing:**
 
-        if (byte == 0xF8) {  // MIDI Clock
-            process_midi_clock_uart(timestamp);
-        } else if (byte == 0xFA || byte == 0xFB || byte == 0xFC) {
-            process_transport_message(byte, timestamp);
-        }
-    }
-}
-```
+The UART interrupt handler processes ALL MIDI messages and maintains complete channel state:
+- System Real Time messages (clock, start/stop/continue)
+- Channel messages (Note On/Off, CC, Program Change, Pitch Bend, etc.)
+- Handles running status for efficient MIDI streams
+- Updates shared state tables accessible via Python API
 
-**2. USB MIDI Clock Processing via Atomic Counters:**
+**2. USB MIDI Complete Message Processing:**
 
-Due to TinyUSB FIFO limitations, we use a patched approach with atomic counters:
-```c
-// TinyUSB patch filters clock messages and increments counters
-volatile uint32_t usb_midi_clock_count = 0;   // F8 - Timing Clock
-volatile uint32_t usb_midi_start_count = 0;   // FA - Start
-volatile uint32_t usb_midi_continue_count = 0; // FB - Continue
-volatile uint32_t usb_midi_stop_count = 0;    // FC - Stop
+Through our TinyUSB patch, USB MIDI messages are processed directly in interrupt context:
 
-// Core 1 polls these counters continuously
-static void core1_usb_midi_poll(void) {
-    uint32_t current_clock_count = denkioto_get_usb_midi_clock_count();
-    int32_t clock_delta = current_clock_count - last_clock_count;
+- **Clock/Transport messages**: Increment atomic counters for Core 1 BPM calculation
+- **Channel messages**: Update complete MIDI state tables (16 channels)
+  - Note On/Off with velocity tracking
+  - Control Change values (all 128 controllers)
+  - Program Change, Pitch Bend, Channel/Poly Aftertouch
+  - Microsecond timestamp for each state change
+- **FIFO management**: NO messages passed to Python FIFO (prevents overflow)
 
-    if (clock_delta > 0) {
-        // Process with timestamp smearing for multiple clocks
-        uint64_t time_per_pulse = (now - last_poll_time) / clock_delta;
-        for (uint32_t i = 0; i < clock_delta; i++) {
-            uint64_t synthetic_timestamp = last_poll_time + (i + 1) * time_per_pulse;
-            process_midi_clock_usb(MIDI_CLOCK, synthetic_timestamp);
-        }
-    }
-}
-```
+Core 1 polls atomic counters for clock messages and calculates precise BPM with timestamp smearing for multiple clocks received between polls.
 
 **3. Unified Clock State Management:**
 ```c
@@ -472,36 +451,69 @@ The clock and beat counts are unified across all sources - only the active sourc
 
 #### Core 0 (Python) Responsibilities
 
-**1. Regular MIDI Message Processing:**
-- Non-clock MIDI messages (notes, CC, program changes, etc.)
-- Message parsing using `adafruit_midi` library
-- User application logic and MIDI routing
+**1. MIDI State Access via Python API:**
 
-**2. Clock Information Access:**
+When Core 1 is running, it maintains complete MIDI state for both UART and USB inputs:
+
 ```python
 import denkioto_rin
+
+# MIDI sources
+SOURCE_UART = 1
+SOURCE_USB = 2
+
+# Access individual note states (0-127 velocity, 0=off)
+velocity = denkioto_rin.get_note(SOURCE_USB, channel=0, note=60)
+
+# Get all notes for a channel as a dict
+notes = denkioto_rin.get_notes(SOURCE_USB, channel=0)
+# Returns: {60: 100, 64: 80, ...}  # note: velocity pairs
+
+# Control Change values
+cc_value = denkioto_rin.get_cc(SOURCE_USB, channel=0, cc=1)  # Modulation
+all_cc = denkioto_rin.get_cc_all(SOURCE_USB, channel=0)      # List of 128 values
+
+# Other MIDI state
+pitch_bend = denkioto_rin.get_pitch_bend(SOURCE_USB, channel=0)  # 0-16383, center=8192
+pressure = denkioto_rin.get_channel_pressure(SOURCE_USB, channel=0)
+program = denkioto_rin.get_program(SOURCE_USB, channel=0)
+
+# Efficient note status (bitmap for active notes)
+note_status = denkioto_rin.get_note_status(SOURCE_USB, channel=0)
+# Returns list of 4 uint32 values representing 128 bits
 
 # Clock information (processed by Core 1 with microsecond precision)
 bpm = denkioto_rin.get_midi_bpm() / 1000.0       # Returns BPM as float
 transport = denkioto_rin.get_transport_state()    # 0=stop, 1=play, 2=pause
 source = denkioto_rin.get_clock_source()          # 1=uart, 2=usb, 0=none
-
-# Regular MIDI data (clock messages automatically filtered out)
-import usb_midi
-port = usb_midi.ports[0]
-data = port.read(32)  # Contains notes/CC/etc, but no clock messages
+clock_count = denkioto_rin.get_clock_count()     # -1 when stopped
+beat_count = denkioto_rin.get_beat_count()       # -1 when stopped
 ```
+
+**2. Important Notes About MIDI Processing:**
+
+- **When Core 1 is active**: ALL USB MIDI messages are processed by Core 1
+  - Clock/transport messages update BPM and transport state
+  - Channel messages update the full MIDI state tables
+  - NO messages are passed to the Python FIFO (prevents overflow)
+  - Use the Python API above to access current MIDI state
+
+- **When Core 1 is not active**: Standard CircuitPython USB MIDI behavior
+  - All messages go to the FIFO for Python processing
+  - Use `usb_midi.ports[0].read()` as normal
+  - No automatic state tracking or BPM calculation
 
 ### Implementation Details
 
-#### TinyUSB Patch for Clock Filtering
+#### TinyUSB Patch for USB MIDI Processing
 
 We apply a patch to TinyUSB during build:
-- **Location**: `patches/0001-Filter-MIDI-clock-messages-before-FIFO.patch`
-- **Function**: Filters clock and transport messages at USB reception on core0 and
-  increments atomic counters that core1 processes into BPM information
-- **Benefit**: Less data to process in Python, enables microsecond-precise timing,
-  less data on the FIFO that Python reads
+- **Location**: `patches/0001-Board-specific-USB-MIDI-processing-for-Denkioto-Rin-RP2040.patch`
+- **Function**: When Core 1 is active, processes ALL USB MIDI messages in interrupt context:
+  - Clock/transport messages increment atomic counters for BPM calculation
+  - Channel messages update full MIDI state tables (notes, CC, pitch bend, etc.)
+  - NO messages are passed to the Python FIFO (prevents overflow)
+- **Benefit**: Professional-grade timing, complete MIDI state tracking, FIFO overflow prevention
 
 #### Thread Safety
 
