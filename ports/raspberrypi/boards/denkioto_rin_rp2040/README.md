@@ -146,6 +146,19 @@ Set the priority order for MIDI clock sources.
 - `sources`: List of source IDs in priority order (e.g., [1, 2] for UART first, USB second)
 - Lower index = higher priority
 
+### MIDI OUT Functions
+
+#### `denkioto_rin.midi_out_write(destination: int, data: bytes) -> int`
+Send MIDI data to the specified destination.
+- `destination`: MIDI destination (MIDI_UART or MIDI_USB)
+- `data`: MIDI bytes to send
+- Returns: Number of bytes written
+
+#### `denkioto_rin.midi_out_ready(destination: int) -> bool`
+Check if MIDI OUT is ready to accept data.
+- `destination`: MIDI destination (MIDI_UART or MIDI_USB)
+- Returns: True if the destination is ready to accept data
+
 ## Example Usage
 
 ```python
@@ -174,6 +187,35 @@ for i in range(10):
               f"[{sync_status}, resync: {resync_count}, ready: {data_ready_count}]")
 
     time.sleep(1)
+
+denkioto_rin.stop()
+```
+
+### MIDI OUT Example
+
+```python
+import denkioto_rin
+import time
+
+# Start core1 to enable MIDI functionality
+denkioto_rin.start()
+
+# Send a MIDI note
+note_on = bytes([0x90, 60, 100])   # Note On, channel 1, middle C, velocity 100
+note_off = bytes([0x80, 60, 0])    # Note Off
+
+# Check if MIDI OUT is ready and send notes
+if denkioto_rin.midi_out_ready(denkioto_rin.MIDI_USB):
+    # Send to USB
+    denkioto_rin.midi_out_write(denkioto_rin.MIDI_USB, note_on)
+    time.sleep(0.5)
+    denkioto_rin.midi_out_write(denkioto_rin.MIDI_USB, note_off)
+
+if denkioto_rin.midi_out_ready(denkioto_rin.MIDI_UART):
+    # Send to UART
+    denkioto_rin.midi_out_write(denkioto_rin.MIDI_UART, note_on)
+    time.sleep(0.5)
+    denkioto_rin.midi_out_write(denkioto_rin.MIDI_UART, note_off)
 
 denkioto_rin.stop()
 ```

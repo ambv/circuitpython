@@ -9,6 +9,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 void denkioto_multicore_init(void);
 void denkioto_multicore_start_core1(void);
@@ -108,5 +109,17 @@ uint8_t denkioto_multicore_get_channel_pressure(uint8_t source, uint8_t channel)
 uint8_t denkioto_multicore_get_program(uint8_t source, uint8_t channel);
 void denkioto_multicore_get_note_status(uint8_t source, uint8_t channel, uint32_t *status);
 uint64_t denkioto_multicore_get_last_update(uint8_t source, uint8_t channel);
+
+// MIDI constants
+#define MIDI_NONE 0
+#define MIDI_UART 1
+#define MIDI_USB 2
+
+// MIDI OUT functions
+void denkioto_multicore_init_midi_out(void);
+void denkioto_multicore_deinit_midi_out(void);
+size_t denkioto_multicore_midi_out_write(uint8_t destination, const uint8_t *data, size_t len);
+bool denkioto_multicore_midi_out_ready(uint8_t destination);
+void denkioto_multicore_midi_panic(void);
 
 #endif // DENKIOTO_MULTICORE_H

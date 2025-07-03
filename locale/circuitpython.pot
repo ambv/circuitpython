@@ -907,6 +907,10 @@ msgstr ""
 msgid "Destination capacity is smaller than destination_length."
 msgstr ""
 
+#: ports/raspberrypi/boards/denkioto_rin_rp2040/denkioto/rin.c
+msgid "Destination must be MIDI_UART or MIDI_USB"
+msgstr ""
+
 #: shared-module/jpegio/JpegDecoder.c
 msgid "Device error or wrong termination of input stream"
 msgstr ""

@@ -36,9 +36,11 @@ void board_init(void) {
 }
 
 void reset_board(void) {
+    denkioto_multicore_midi_panic();
     denkioto_multicore_stop_core1(1);
 }
 
 void board_deinit(void) {
+    denkioto_multicore_midi_panic();
     denkioto_multicore_stop_core1(2);
 }

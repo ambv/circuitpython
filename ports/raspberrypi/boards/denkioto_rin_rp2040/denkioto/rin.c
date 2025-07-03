@@ -10,10 +10,10 @@
 
 #include "multicore.h"
 
-// Define MIDI source constants for Python module
-#define MIDI_SOURCE_NONE 0
-#define MIDI_SOURCE_UART 1
-#define MIDI_SOURCE_USB 2
+// Define MIDI constants for Python module
+#define MIDI_NONE 0
+#define MIDI_UART 1
+#define MIDI_USB 2
 
 //| """Multicore functionality for the denkioto_rin_rp2040 board.
 //|
@@ -198,9 +198,9 @@ static mp_obj_t denkioto_rin_set_clock_source_priority_func(mp_obj_t sources_obj
 
         for (size_t i = 0; i < len && i < 2; i++) {
             mp_int_t source = mp_obj_get_int(items[i]);
-            if (source == MIDI_SOURCE_UART) {
+            if (source == MIDI_UART) {
                 uart_priority = i + 1;
-            } else if (source == MIDI_SOURCE_USB) {
+            } else if (source == MIDI_USB) {
                 usb_priority = i + 1;
             }
         }
@@ -582,6 +582,48 @@ static mp_obj_t denkioto_rin_get_note_status_func(mp_obj_t source_obj, mp_obj_t 
 }
 static MP_DEFINE_CONST_FUN_OBJ_2(denkioto_rin_get_note_status_obj, denkioto_rin_get_note_status_func);
 
+// MIDI OUT functions
+static mp_obj_t denkioto_rin_midi_out_write_func(mp_obj_t destination_obj, mp_obj_t data_obj) {
+    // | def midi_out_write(destination: int, data: ReadableBuffer) -> int:
+    // |     """Write MIDI data to the specified destination.
+    // |
+    // |     :param destination: MIDI destination (MIDI_UART or MIDI_USB)
+    // |     :param data: MIDI bytes to send
+    // |     :return: Number of bytes written
+    // |     """
+    // |     ...
+    // |
+    mp_int_t destination = mp_obj_get_int(destination_obj);
+    if (destination != MIDI_UART && destination != MIDI_USB) {
+        mp_raise_ValueError(MP_ERROR_TEXT("Destination must be MIDI_UART or MIDI_USB"));
+    }
+
+    mp_buffer_info_t bufinfo;
+    mp_get_buffer_raise(data_obj, &bufinfo, MP_BUFFER_READ);
+
+    size_t written = denkioto_multicore_midi_out_write(destination, bufinfo.buf, bufinfo.len);
+    return mp_obj_new_int(written);
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(denkioto_rin_midi_out_write_obj, denkioto_rin_midi_out_write_func);
+
+static mp_obj_t denkioto_rin_midi_out_ready_func(mp_obj_t destination_obj) {
+    // | def midi_out_ready(destination: int) -> bool:
+    // |     """Check if MIDI OUT is ready to accept data.
+    // |
+    // |     :param destination: MIDI destination (MIDI_UART or MIDI_USB)
+    // |     :return: True if the destination is ready to accept data
+    // |     """
+    // |     ...
+    // |
+    mp_int_t destination = mp_obj_get_int(destination_obj);
+    if (destination != MIDI_UART && destination != MIDI_USB) {
+        mp_raise_ValueError(MP_ERROR_TEXT("Destination must be MIDI_UART or MIDI_USB"));
+    }
+
+    return mp_obj_new_bool(denkioto_multicore_midi_out_ready(destination));
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(denkioto_rin_midi_out_ready_obj, denkioto_rin_midi_out_ready_func);
+
 static const mp_rom_map_elem_t denkioto_rin_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR___name__), MP_ROM_QSTR(MP_QSTR_denkioto_rin) },
     { MP_ROM_QSTR(MP_QSTR_start), MP_ROM_PTR(&denkioto_rin_start_obj) },
@@ -614,9 +656,13 @@ static const mp_rom_map_elem_t denkioto_rin_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_get_program), MP_ROM_PTR(&denkioto_rin_get_program_obj) },
     { MP_ROM_QSTR(MP_QSTR_get_note_status), MP_ROM_PTR(&denkioto_rin_get_note_status_obj) },
 
-    // MIDI source constants
-    { MP_ROM_QSTR(MP_QSTR_MIDI_UART), MP_ROM_INT(MIDI_SOURCE_UART) },
-    { MP_ROM_QSTR(MP_QSTR_MIDI_USB), MP_ROM_INT(MIDI_SOURCE_USB) },
+    // MIDI constants
+    { MP_ROM_QSTR(MP_QSTR_MIDI_UART), MP_ROM_INT(MIDI_UART) },
+    { MP_ROM_QSTR(MP_QSTR_MIDI_USB), MP_ROM_INT(MIDI_USB) },
+
+    // MIDI OUT functions
+    { MP_ROM_QSTR(MP_QSTR_midi_out_write), MP_ROM_PTR(&denkioto_rin_midi_out_write_obj) },
+    { MP_ROM_QSTR(MP_QSTR_midi_out_ready), MP_ROM_PTR(&denkioto_rin_midi_out_ready_obj) },
 };
 
 static MP_DEFINE_CONST_DICT(denkioto_rin_module_globals, denkioto_rin_module_globals_table);
