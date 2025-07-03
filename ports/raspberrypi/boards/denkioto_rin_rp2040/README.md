@@ -1,20 +1,21 @@
 # Denkioto Rin RP2040 Board - Multicore Support
 
-This board configuration extends the standard CircuitPython RP2040 implementation with dual-core functionality, allowing you to utilize both cores of the RP2040 microcontroller with IRQ-based double-buffered DMA for high-performance touch ring data acquisition.
+This port handles the Denkioto Rin MIDI controller hardware.
 
 ## Overview
 
-The RP2040 microcontroller has two ARM Cortex-M0+ cores, but standard CircuitPython only uses one core (core0) for the main interpreter. This board implementation adds support for running background tasks on the second core (core1) with microsecond-precise DMA-based data collection.
+The RP2040 microcontroller has two ARM Cortex-M0+ cores, but standard
+CircuitPython only uses one core (Core0) for the main interpreter. This
+board implementation adds support for running background tasks on the
+second core (Core1) with microsecond-precise DMA-based and IRQ-based
+data collection.
 
-## Features
-
-- exposing realtime touch ring data to Python code
-    - data acquisition via DMA_IRQ_1 interrupts on core1 with double-buffering for consistent
-      reads on core0 with CircuitPython
-    - frame synchronization
-    - thread safety through a three-state atomic system
--
-- debug counters and stats printing for core1 activity visibility from Python
+This board configuration extends the standard CircuitPython RP2040
+implementation with dual-core functionality, allowing you to utilize
+both cores of the RP2040 microcontroller with IRQ-based double-buffered
+DMA for high-performance touch ring data acquisition, unified MIDI IN
+clock handling, and an efficient state-based MIDI IN implementation for
+both UART MIDI and USB MIDI. A custom MIDI OUT API is also available.
 
 ## Hardware
 
@@ -25,7 +26,7 @@ The RP2040 microcontroller has two ARM Cortex-M0+ cores, but standard CircuitPyt
 - **Status LED**: GPIO16
 - **Touch Rings**: 4 rings connected via PIO-based UART at 100kHz
 
-## Touch Ring Pin Configuration
+## Pin Configuration
 
 - **Ring 0**: RX=GPIO3, TX=GPIO2
 - **Ring 1**: RX=GPIO5, TX=GPIO4
@@ -56,7 +57,7 @@ Complete VSCode setup for CircuitPython development is available in the reposito
 ### Hardware Debugging Setup
 - **Debug Probe**: Raspberry Pi Debug Probe (connect D port to device SWD pins)
 - **OpenOCD**: Required for debugging (`brew install openocd`)
-- **Multi-core Support**: Separate debug sessions for core0 (port 50000) and core1 (port 50003)
+- **Multi-core Support**: Separate debug sessions for Core0 (port 50000) and Core1 (port 50003)
 - **Debug Configurations**:
   - "Debug RP2040 Core0" - Launch debugging with automatic build
   - "Attach to RP2040 Core0" - Attach to running firmware
@@ -74,16 +75,16 @@ The board provides a `denkioto_rin` module with the following functions:
 ### Core Control Functions
 
 #### `denkioto_rin.start()`
-Start core1 execution with IRQ-based DMA data collection. Core1 will begin running with automatic frame synchronization.
+Start Core1 execution with IRQ-based DMA data collection. Core1 will begin running with automatic frame synchronization.
 
 #### `denkioto_rin.stop() -> int`
-Stop core1 execution. Returns the number of core0 cycles of waiting to stop core1, or -1 if core1 was not running.
+Stop Core1 execution. Returns the number of Core0 cycles of waiting to stop Core1, or -1 if Core1 was not running.
 
 #### `denkioto_rin.get_counter() -> int`
-Get the current counter value from core1. This value is read atomically.
+Get the current counter value from Core1. This value is read atomically.
 
 #### `denkioto_rin.is_running() -> bool`
-Check if core1 is currently running.
+Check if Core1 is currently running.
 
 #### `denkioto_rin.reset_counter()`
 Reset the counter to zero. This operation is atomic.
@@ -165,7 +166,7 @@ Check if MIDI OUT is ready to accept data.
 import time
 import denkioto_rin
 
-# Start core1 with IRQ-based DMA
+# Start Core1 with IRQ-based DMA
 denkioto_rin.start()
 
 # Monitor for 10 seconds
@@ -197,7 +198,7 @@ denkioto_rin.stop()
 import denkioto_rin
 import time
 
-# Start core1 to enable MIDI functionality
+# Start Core1 to enable MIDI functionality
 denkioto_rin.start()
 
 # Send a MIDI note
@@ -251,7 +252,7 @@ Each touch ring emits 26-byte frames at 100kHz:
 // Three-state atomic flags per ring:
 // 0 = data not ready (stale or being written)
 // 1 = data ready for reading
-// 2 = data being read (core0 has exclusive access)
+// 2 = data being read (Core0 has exclusive access)
 static volatile uint32_t ring_data_state[4];
 ```
 
@@ -273,7 +274,7 @@ The IRQ-based DMA implementation is fully working with the following features:
 
 - ✅ **IRQ-based synchronization**: Single-byte transfers until zero found, then 26-byte mode
 - ✅ **Perfect frame alignment**: Every processed frame starts with zero at index 0
-- ✅ **Double-buffered DMA**: Prevents data loss during core1 processing
+- ✅ **Double-buffered DMA**: Prevents data loss during Core1 processing
 - ✅ **Thread-safe atomic access**: Three-state system for safe data sharing
 - ✅ **Debug counters**: Monitor sync events and data flow without printf overhead
 - ✅ **Board-contained solution**: Zero changes to core CircuitPython required
@@ -446,11 +447,11 @@ pixels.show()
 
 Core 1 handles precise MIDI clock timing while Core 0 processes regular MIDI messages in Python.
 
-#### Core 1 Responsibilities
+#### Core 0 vs Core 1 Responsibilities
 
 **1. UART MIDI Complete Message Processing:**
 
-The UART interrupt handler processes ALL MIDI messages and maintains complete channel state:
+The UART interrupt handler on Core1 processes all MIDI messages and maintains complete channel state:
 - System Real Time messages (clock, start/stop/continue)
 - Channel messages (Note On/Off, CC, Program Change, Pitch Bend, etc.)
 - Handles running status for efficient MIDI streams
@@ -458,7 +459,7 @@ The UART interrupt handler processes ALL MIDI messages and maintains complete ch
 
 **2. USB MIDI Complete Message Processing:**
 
-Through our TinyUSB patch, USB MIDI messages are processed directly in interrupt context:
+Through our TinyUSB patch, all USB MIDI messages are processed directly in interrupt context on Core0:
 
 - **Clock/Transport messages**: Increment atomic counters for Core 1 BPM calculation
 - **Channel messages**: Update complete MIDI state tables (16 channels)
@@ -484,18 +485,14 @@ typedef struct {
 
 The clock and beat counts are unified across all sources - only the active source increments these counters. This ensures consistent timing regardless of which source is selected.
 
-**Clock Source Priority and Selection:**
+**4. Clock Source Priority and Selection:**
 - Each source (UART, USB) has a configurable priority (lower number = higher priority)
 - The highest priority source with recent clock messages becomes the active source
 - Only the active source's clock messages increment the unified counters
 - If the active source times out (>500ms without clocks), the system switches to the next available source
 - This prevents clock/beat count jumps when switching between sources
 
-#### Core 0 (Python) Responsibilities
-
-**1. MIDI State Access via Python API:**
-
-When Core 1 is running, it maintains complete MIDI state for both UART and USB inputs:
+**5. Python-level access on Core 0:**
 
 ```python
 import denkioto_rin
@@ -503,6 +500,8 @@ import denkioto_rin
 # MIDI sources
 SOURCE_UART = 1
 SOURCE_USB = 2
+
+denkioto_rin.start()
 
 # Access individual note states (0-127 velocity, 0=off)
 velocity = denkioto_rin.get_note(SOURCE_USB, channel=0, note=60)
@@ -532,18 +531,30 @@ clock_count = denkioto_rin.get_clock_count()     # -1 when stopped
 beat_count = denkioto_rin.get_beat_count()       # -1 when stopped
 ```
 
-**2. Important Notes About MIDI Processing:**
+#### "Vanilla" CircuitPython vs `denkioto_rin.start()`
 
-- **When Core 1 is active**: ALL USB MIDI messages are processed by Core 1
-  - Clock/transport messages update BPM and transport state
-  - Channel messages update the full MIDI state tables
-  - NO messages are passed to the Python FIFO (prevents overflow)
-  - Use the Python API above to access current MIDI state
+After running `denkioto_rin.start()`, MIDI IN and OUT are implemented by
+optimized routines using interrupt handlers on both cores:
+- Clock/transport messages update BPM and transport state
+- Channel messages update the full MIDI state tables
+- NO messages are passed to the Python USB MIDI FIFO (prevents overflow)
+- Instantiating `busio.UART()` from CircuitPython for TX or RX pins is
+  impossible
+- The `denkioto_rin` Python API is the way to access current MIDI state
+  and to send MIDI out
+- Additionally, Core1 handles touch ring data acquisition
 
-- **When Core 1 is not active**: Standard CircuitPython USB MIDI behavior
-  - All messages go to the FIFO for Python processing
-  - Use `usb_midi.ports[0].read()` as normal
-  - No automatic state tracking or BPM calculation
+After running `denkioto_rin.stop()` (or running a new `code.py` file without
+ever calling `denkioto_rin.start()`, standard CircuitPython behavior is
+available:
+- All USB MIDI messages go to the USB MIDI FIFO for Python processing
+- Use `usb_midi.ports[0].read()` as normal
+- Use `busio.UART()` for UART MIDI processing
+- No automatic state tracking or BPM calculation
+- No touch ring data acquisition, set it up from CircuitPython manually
+  using `rp2pio.StateMachine().background_read`
+- Core1 is entirely unutilized, leading to less predictable performance
+  and risking buffers filling up unless Python reads them quickly enough
 
 ### Implementation Details
 
@@ -890,7 +901,7 @@ The Pico SDK's `multicore_lockout` mechanism solves all these issues:
 ### Core 1 Lifecycle and Auto-Reload Behavior
 
 **Critical insight**: Core 1 must always **shut down gracefully** during CircuitPython auto-reload. This
-means setting `core1_should_stop` to `true` and waiting for core1 to mark itself as no longer running.
+means setting `core1_should_stop` to `true` and waiting for Core1 to mark itself as no longer running.
 This can only happen when Core 1 is unlocked for execution (no `multicore_lockout` in use).
 The reason Core 1 must shut down cleanly is because it needs to turn off its own IRQs.
 
@@ -944,7 +955,7 @@ void denkioto_multicore_pause(void) {
 ```
 
 **Core 0 must ALSO be victim initialized** because it receives an
-acknowledgment message on the same intercore FIFO after core1 resumes.
+acknowledgment message on the same intercore FIFO after Core1 resumes.
 
 ### DMA Channel Management
 
