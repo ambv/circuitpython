@@ -26,6 +26,7 @@
 
 #include "supervisor/board.h"
 #include "denkioto/multicore.h"
+#include "denkioto/neopixel_nb.h"
 
 // Use the MP_WEAK supervisor/shared/board.c versions of routines not defined here.
 static timer_hw_t *pico_timer = PICO_DEFAULT_TIMER_INSTANCE();
@@ -37,10 +38,12 @@ void board_init(void) {
 
 void reset_board(void) {
     denkioto_multicore_midi_panic();
+    denkioto_neopixel_nb_deinit();
     denkioto_multicore_stop_core1(1);
 }
 
 void board_deinit(void) {
     denkioto_multicore_midi_panic();
+    denkioto_neopixel_nb_deinit();
     denkioto_multicore_stop_core1(2);
 }

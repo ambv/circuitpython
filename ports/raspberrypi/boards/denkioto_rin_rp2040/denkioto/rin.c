@@ -1,6 +1,6 @@
 // This file is part of the CircuitPython project: https://circuitpython.org
 //
-// SPDX-FileCopyrightText: Copyright (c) 2025 Scott Shawcroft for Adafruit Industries
+// SPDX-FileCopyrightText: Copyright (c) 2025 Łukasz Langa
 //
 // SPDX-License-Identifier: MIT
 
@@ -9,6 +9,8 @@
 #include "py/builtin.h"
 
 #include "multicore.h"
+#include "neopixel_nb.h"
+#include "shared-bindings/digitalio/DigitalInOut.h"
 
 // Define MIDI constants for Python module
 #define MIDI_NONE 0
@@ -624,6 +626,76 @@ static mp_obj_t denkioto_rin_midi_out_ready_func(mp_obj_t destination_obj) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(denkioto_rin_midi_out_ready_obj, denkioto_rin_midi_out_ready_func);
 
+// Non-blocking NeoPixel functions
+static mp_obj_t denkioto_rin_neopixel_nb_write_dual_func(size_t n_args, const mp_obj_t *args) {
+    // | def neopixel_nb_write_dual(pin1: Optional[DigitalInOut], pixels1: Optional[ReadableBuffer],
+    // |                           pin2: Optional[DigitalInOut], pixels2: Optional[ReadableBuffer]) -> bool:
+    // |     """Write to two NeoPixel strips simultaneously without blocking.
+    // |
+    // |     This function starts transmission on up to two LED pins simultaneously and returns
+    // |     immediately. If a previous transmission is still in progress, this call will be
+    // |     dropped and return False.
+    // |
+    // |     :param pin1: First LED pin (or None to skip)
+    // |     :param pixels1: Pixel data for first strip (or None to skip)
+    // |     :param pin2: Second LED pin (or None to skip)
+    // |     :param pixels2: Pixel data for second strip (or None to skip)
+    // |     :return: True if transmission started, False if busy or invalid parameters
+    // |     """
+    // |     ...
+    // |
+
+    // Parse arguments
+    const digitalio_digitalinout_obj_t *pin1 = NULL;
+    const uint8_t *pixels1 = NULL;
+    uint32_t num_bytes1 = 0;
+
+    const digitalio_digitalinout_obj_t *pin2 = NULL;
+    const uint8_t *pixels2 = NULL;
+    uint32_t num_bytes2 = 0;
+
+    // Check pin1 and pixels1
+    if (n_args >= 2 && args[0] != mp_const_none && args[1] != mp_const_none) {
+        pin1 = mp_arg_validate_type(args[0], &digitalio_digitalinout_type, MP_QSTR_pin1);
+
+        mp_buffer_info_t bufinfo1;
+        mp_get_buffer_raise(args[1], &bufinfo1, MP_BUFFER_READ);
+        pixels1 = bufinfo1.buf;
+        num_bytes1 = bufinfo1.len;
+    }
+
+    // Check pin2 and pixels2
+    if (n_args >= 4 && args[2] != mp_const_none && args[3] != mp_const_none) {
+        pin2 = mp_arg_validate_type(args[2], &digitalio_digitalinout_type, MP_QSTR_pin2);
+
+        mp_buffer_info_t bufinfo2;
+        mp_get_buffer_raise(args[3], &bufinfo2, MP_BUFFER_READ);
+        pixels2 = bufinfo2.buf;
+        num_bytes2 = bufinfo2.len;
+    }
+
+    // At least one pin must be specified
+    if (!pin1 && !pin2) {
+        mp_raise_ValueError(MP_ERROR_TEXT("At least one pin must be specified"));
+    }
+
+    bool result = denkioto_neopixel_nb_write_dual(pin1, pixels1, num_bytes1, pin2, pixels2, num_bytes2);
+    return mp_obj_new_bool(result);
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(denkioto_rin_neopixel_nb_write_dual_obj, 4, 4, denkioto_rin_neopixel_nb_write_dual_func);
+
+static mp_obj_t denkioto_rin_neopixel_nb_is_busy_func(void) {
+    // | def neopixel_nb_is_busy() -> bool:
+    // |     """Check if a non-blocking NeoPixel write is in progress.
+    // |
+    // |     :return: True if transmission is still in progress, False if idle
+    // |     """
+    // |     ...
+    // |
+    return mp_obj_new_bool(denkioto_neopixel_nb_is_busy());
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(denkioto_rin_neopixel_nb_is_busy_obj, denkioto_rin_neopixel_nb_is_busy_func);
+
 static const mp_rom_map_elem_t denkioto_rin_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR___name__), MP_ROM_QSTR(MP_QSTR_denkioto_rin) },
     { MP_ROM_QSTR(MP_QSTR_start), MP_ROM_PTR(&denkioto_rin_start_obj) },
@@ -663,6 +735,10 @@ static const mp_rom_map_elem_t denkioto_rin_module_globals_table[] = {
     // MIDI OUT functions
     { MP_ROM_QSTR(MP_QSTR_midi_out_write), MP_ROM_PTR(&denkioto_rin_midi_out_write_obj) },
     { MP_ROM_QSTR(MP_QSTR_midi_out_ready), MP_ROM_PTR(&denkioto_rin_midi_out_ready_obj) },
+
+    // Non-blocking NeoPixel functions
+    { MP_ROM_QSTR(MP_QSTR_neopixel_nb_write_dual), MP_ROM_PTR(&denkioto_rin_neopixel_nb_write_dual_obj) },
+    { MP_ROM_QSTR(MP_QSTR_neopixel_nb_is_busy), MP_ROM_PTR(&denkioto_rin_neopixel_nb_is_busy_obj) },
 };
 
 static MP_DEFINE_CONST_DICT(denkioto_rin_module_globals, denkioto_rin_module_globals_table);

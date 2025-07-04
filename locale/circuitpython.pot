@@ -600,6 +600,10 @@ msgstr ""
 msgid "Async SPI transfer in progress on this bus, keep awaiting."
 msgstr ""
 
+#: ports/raspberrypi/boards/denkioto_rin_rp2040/denkioto/rin.c
+msgid "At least one pin must be specified"
+msgstr ""
+
 #: shared-module/memorymonitor/AllocationAlarm.c
 #, c-format
 msgid "Attempt to allocate %d blocks"
